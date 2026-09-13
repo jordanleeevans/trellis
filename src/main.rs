@@ -1,14 +1,18 @@
+mod git;
 mod shell;
 
-use crossterm::event;
+use crate::git::status::status as git_status;
+use anyhow::Result;
+use std::env;
 
-fn main() -> std::io::Result<()> {
-    ratatui::run(|terminal| {
-        loop {
-            terminal.draw(|frame| frame.render_widget("Hello World!", frame.area()))?;
-            if event::read()?.is_key_press() {
-                break Ok(());
-            }
-        }
-    })
+#[tokio::main]
+async fn main() -> Result<()> {
+    let cwd = env::current_dir()?;
+    let shell = shell::ProcessShell;
+
+    let output = git_status(&shell, cwd.as_path()).await?;
+
+    println!("{output}");
+
+    Ok(())
 }

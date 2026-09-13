@@ -4,6 +4,7 @@ mod process;
 
 pub use error::ShellError;
 pub use output::ShellOutput;
+pub use process::ProcessShell;
 
 use std::path::Path;
 
@@ -16,4 +17,3 @@ pub trait Shell: Send + Sync {
         args: &[&str],
     ) -> Result<ShellOutput, ShellError>;
 }
-
