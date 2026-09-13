@@ -1,3 +1,5 @@
+mod shell;
+
 use crossterm::event;
 
 fn main() -> std::io::Result<()> {
