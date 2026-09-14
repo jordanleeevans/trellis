@@ -1,10 +1,14 @@
 //! Abstractions for running external commands.
 
 mod error;
+#[cfg(test)]
+mod mock;
 mod output;
 mod process;
 
 pub use error::ShellError;
+#[cfg(test)]
+pub use mock::MockShell;
 pub use output::ShellOutput;
 pub use process::ProcessShell;
 
