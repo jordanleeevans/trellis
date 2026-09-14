@@ -107,25 +107,28 @@ impl ProcessShell {
             let mut stdout = BufReader::new(stdout).lines();
             let mut stderr = BufReader::new(stderr).lines();
 
-            loop {
+            let mut stdout_done = false;
+            let mut stderr_done = false;
+
+            while !stdout_done || !stderr_done {
                 tokio::select! {
-                    line = stdout.next_line() => {
+                    line = stdout.next_line(), if !stdout_done => {
                         match line {
                             Ok(Some(line)) => {
                                 let _ = tx.send(ShellEvent::Stdout(line));
                             }
-                            Ok(None) => break,
-                            Err(_) => break,
+                            Ok(None) => stdout_done = true,
+                            Err(_) => stdout_done = true,
                         }
                     }
 
-                    line = stderr.next_line() => {
+                    line = stderr.next_line(), if !stderr_done => {
                         match line {
                             Ok(Some(line)) => {
                                 let _ = tx.send(ShellEvent::Stderr(line));
                             }
-                            Ok(None) => break,
-                            Err(_) => break,
+                            Ok(None) => stderr_done = true,
+                            Err(_) => stderr_done = true,
                         }
                     }
                 }
