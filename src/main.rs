@@ -1,3 +1,5 @@
+//! Prints `git status --short` for the current directory.
+
 mod git;
 mod shell;
 

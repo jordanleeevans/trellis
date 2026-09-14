@@ -1,3 +1,4 @@
+/// The captured result of running a command to completion.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ShellOutput {
     pub stdout: String,
@@ -6,6 +7,7 @@ pub struct ShellOutput {
 }
 
 impl ShellOutput {
+    /// Returns `true` if the command exited with code `0`.
     pub fn success(&self) -> bool {
         self.exit_code == 0
     }

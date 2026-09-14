@@ -10,22 +10,30 @@ use tokio::{
 
 use super::{Shell, ShellError, ShellOutput};
 
+/// A [`Shell`] implementation that runs commands as native OS processes.
 #[derive(Debug, Default)]
 pub struct ProcessShell;
 
+/// An event emitted while a [`RunningCommand`] executes.
 #[derive(Debug, Clone, PartialEq)]
 pub enum ShellEvent {
+    /// A line written to the process's stdout.
     Stdout(String),
+    /// A line written to the process's stderr.
     Stderr(String),
+    /// The process has exited; no further events follow.
     Finished(ShellOutput),
 }
 
+/// A handle to a command that was started with [`ProcessShell::stream`].
 pub struct RunningCommand {
+    /// Receives [`ShellEvent`]s as the command produces output and exits.
     pub events: mpsc::UnboundedReceiver<ShellEvent>,
 }
 
 #[async_trait::async_trait]
 impl Shell for ProcessShell {
+    /// Runs `program` to completion, buffering its stdout and stderr.
     async fn run(
         &self,
         cwd: &Path,
@@ -68,6 +76,8 @@ impl Shell for ProcessShell {
 }
 
 impl ProcessShell {
+    /// Spawns `program` and streams its stdout/stderr lines as they arrive,
+    /// rather than waiting for it to finish like [`Shell::run`].
     pub fn stream(
         &self,
         cwd: &Path,
