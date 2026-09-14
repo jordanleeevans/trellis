@@ -1,9 +1,9 @@
 use std::path::Path;
 
-use crate::shell::{ProcessShell, Shell, ShellError};
+use crate::shell::{Shell, ShellError};
 
 /// Rebases the current branch of the repository at `repo` onto `onto`.
-pub async fn rebase(shell: &ProcessShell, repo: &Path, onto: &str) -> Result<String, ShellError> {
+pub async fn rebase(shell: &impl Shell, repo: &Path, onto: &str) -> Result<String, ShellError> {
     let output = shell.run(repo, "git", &["rebase", onto]).await?;
     Ok(output.stdout)
 }
@@ -11,6 +11,25 @@ pub async fn rebase(shell: &ProcessShell, repo: &Path, onto: &str) -> Result<Str
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::shell::{MockShell, ProcessShell, ShellOutput};
+
+    #[tokio::test]
+    async fn returns_shell_stdout() {
+        let repo = std::env::current_dir().unwrap();
+        let shell = MockShell::new().when(
+            "git",
+            &["rebase", "main"],
+            Ok(ShellOutput {
+                stdout: "Successfully rebased and updated refs/heads/feature.".to_string(),
+                stderr: String::new(),
+                exit_code: 0,
+            }),
+        );
+
+        let output = rebase(&shell, repo.as_path(), "main").await.unwrap();
+
+        assert_eq!(output, "Successfully rebased and updated refs/heads/feature.");
+    }
 
     async fn run(shell: &ProcessShell, repo: &Path, args: &[&str]) {
         shell.run(repo, "git", args).await.unwrap();

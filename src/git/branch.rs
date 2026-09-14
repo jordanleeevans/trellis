@@ -1,9 +1,9 @@
 use std::path::Path;
 
-use crate::shell::{ProcessShell, Shell, ShellError};
+use crate::shell::{Shell, ShellError};
 
 /// Returns the `git branch --list` output for the repository at `repo`.
-pub async fn branch(shell: &ProcessShell, repo: &Path) -> Result<String, ShellError> {
+pub async fn branch(shell: &impl Shell, repo: &Path) -> Result<String, ShellError> {
     let output = shell.run(repo, "git", &["branch", "--list"]).await?;
     Ok(output.stdout)
 }
@@ -11,6 +11,25 @@ pub async fn branch(shell: &ProcessShell, repo: &Path) -> Result<String, ShellEr
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::shell::{MockShell, ProcessShell, ShellOutput};
+
+    #[tokio::test]
+    async fn returns_shell_stdout() {
+        let repo = std::env::current_dir().unwrap();
+        let shell = MockShell::new().when(
+            "git",
+            &["branch", "--list"],
+            Ok(ShellOutput {
+                stdout: "* main\n  feature-a".to_string(),
+                stderr: String::new(),
+                exit_code: 0,
+            }),
+        );
+
+        let output = branch(&shell, repo.as_path()).await.unwrap();
+
+        assert_eq!(output, "* main\n  feature-a");
+    }
 
     async fn init_repo_with_commit(shell: &ProcessShell, repo: &Path) {
         shell.run(repo, "git", &["init"]).await.unwrap();
