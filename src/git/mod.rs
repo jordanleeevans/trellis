@@ -1,1 +1,2 @@
-pub mod status;
+mod status;
+pub use status::status;
