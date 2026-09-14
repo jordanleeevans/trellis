@@ -148,6 +148,7 @@ impl ProcessShell {
 mod tests {
     use super::*;
     use std::env;
+    use std::time::{Duration, Instant};
 
     #[tokio::test]
     async fn stream_returns_binary_not_found_for_missing_program() {
@@ -313,6 +314,62 @@ mod tests {
 
         assert!(saw_stdout);
         assert!(saw_stderr);
+        assert!(saw_finished);
+    }
+
+    #[tokio::test]
+    async fn slow_command_does_not_block_stream_or_event_polling() {
+        let spawn_start = Instant::now();
+
+        let running_cmd = ProcessShell
+            .stream(
+                env::current_dir().unwrap().as_path(),
+                "sh",
+                &["-c", "sleep 0.3; echo done"],
+            )
+            .unwrap();
+
+        // stream() must return immediately, well before the command's sleep
+        // finishes, instead of waiting for the process to exit.
+        assert!(
+            spawn_start.elapsed() < Duration::from_millis(100),
+            "stream() blocked the caller instead of returning immediately"
+        );
+
+        let mut events = running_cmd.events;
+
+        // Polling for events while the command is still sleeping must not
+        // block either, the way a render loop's per-frame poll would call it.
+        let poll_start = Instant::now();
+        assert!(
+            events.try_recv().is_err(),
+            "expected no events yet while the command is still sleeping"
+        );
+        assert!(
+            poll_start.elapsed() < Duration::from_millis(50),
+            "polling for events blocked instead of returning immediately"
+        );
+
+        let mut saw_stdout = false;
+        let mut saw_finished = false;
+
+        while let Some(event) = events.recv().await {
+            match event {
+                ShellEvent::Stdout(line) => {
+                    if line == "done" {
+                        saw_stdout = true;
+                    }
+                }
+                ShellEvent::Finished(output) => {
+                    assert_eq!(output.exit_code, 0);
+                    saw_finished = true;
+                    break;
+                }
+                ShellEvent::Stderr(_) => {}
+            }
+        }
+
+        assert!(saw_stdout);
         assert!(saw_finished);
     }
 }
