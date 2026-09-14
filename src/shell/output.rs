@@ -37,6 +37,6 @@ mod tests {
         };
 
         assert_ne!(output.exit_code, 0);
-        assert_eq!(output.success(), false);
+        assert!(!output.success());
     }
 }
