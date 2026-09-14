@@ -10,6 +10,21 @@ use tokio::{
 
 use super::{Shell, ShellError, ShellOutput};
 
+/// Checks whether `program` resolves to an executable file, either directly
+/// (if it contains a path separator) or by searching `PATH`.
+///
+/// Used to disambiguate a spawn failure's cause: some platforms (e.g. WSL)
+/// report a missing binary as `PermissionDenied` rather than `NotFound`.
+fn binary_exists(program: &str) -> bool {
+    if program.contains(std::path::MAIN_SEPARATOR) {
+        return Path::new(program).is_file();
+    }
+
+    std::env::var_os("PATH")
+        .map(|paths| std::env::split_paths(&paths).any(|dir| dir.join(program).is_file()))
+        .unwrap_or(false)
+}
+
 /// A [`Shell`] implementation that runs commands as native OS processes.
 #[derive(Debug, Default)]
 pub struct ProcessShell;
@@ -49,7 +64,9 @@ impl Shell for ProcessShell {
         let output = match result {
             Ok(output) => output,
 
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            Err(error)
+                if error.kind() == std::io::ErrorKind::NotFound || !binary_exists(program) =>
+            {
                 return Err(ShellError::BinaryNotFound(program.to_owned()));
             }
 
@@ -91,7 +108,7 @@ impl ProcessShell {
             .stderr(Stdio::piped())
             .spawn()
             .map_err(|error| {
-                if error.kind() == std::io::ErrorKind::NotFound {
+                if error.kind() == std::io::ErrorKind::NotFound || !binary_exists(program) {
                     ShellError::BinaryNotFound(program.to_owned())
                 } else {
                     ShellError::Spawn(error)
