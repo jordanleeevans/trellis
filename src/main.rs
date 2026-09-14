@@ -1,9 +1,10 @@
-//! Prints `git status --short` for the current directory.
+//! An entry-point TUI panel listing locally tracked `gh stack` stacks.
 
 mod doctor;
 mod git;
 mod shell;
 mod stack;
+mod tui;
 
 use anyhow::Result;
 use std::env;
@@ -18,9 +19,5 @@ async fn main() -> Result<()> {
         std::process::exit(1);
     }
 
-    let output = git::status(&shell, cwd.as_path()).await?;
-
-    println!("{output}");
-
-    Ok(())
+    tui::run(&shell, cwd.as_path()).await
 }
