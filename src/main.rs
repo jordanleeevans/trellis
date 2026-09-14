@@ -3,6 +3,7 @@
 mod doctor;
 mod git;
 mod shell;
+mod stack;
 
 use anyhow::Result;
 use std::env;
