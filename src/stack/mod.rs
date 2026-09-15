@@ -3,13 +3,16 @@
 
 mod commit;
 mod layer;
+pub mod local;
 mod pull_request;
 mod stack;
+mod summary;
 
 pub use commit::CommitInfo;
 pub use layer::Layer;
 pub use pull_request::PullRequestRef;
 pub use stack::Stack;
+pub use summary::{PrCounts, StackSummary, list_stacks};
 
 #[cfg(test)]
 mod tests {

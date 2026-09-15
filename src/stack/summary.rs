@@ -1,0 +1,284 @@
+use std::path::Path;
+
+use thiserror::Error;
+
+use crate::shell::{Shell, ShellError};
+
+use super::layer::Layer;
+use super::local::{LocalStackError, read_local_stacks};
+use super::pull_request::hydrate_pull_request;
+
+/// Errors that can occur while enumerating locally tracked stacks.
+#[derive(Debug, Error)]
+pub enum StackSummaryError {
+    #[error(transparent)]
+    LocalStack(#[from] LocalStackError),
+
+    #[error(transparent)]
+    Shell(#[from] ShellError),
+}
+
+/// Counts of pull request states across a stack's layers.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct PrCounts {
+    pub open: usize,
+    pub draft: usize,
+    pub merged: usize,
+    pub closed: usize,
+    /// Layers with no linked pull request yet (not pushed/submitted).
+    pub unsubmitted: usize,
+}
+
+impl PrCounts {
+    fn record(&mut self, layer: &Layer) {
+        let Some(pr) = &layer.pull_request else {
+            self.unsubmitted += 1;
+            return;
+        };
+
+        if pr.is_draft == Some(true) {
+            self.draft += 1;
+        } else {
+            match pr.state.as_str() {
+                "MERGED" => self.merged += 1,
+                "CLOSED" => self.closed += 1,
+                _ => self.open += 1,
+            }
+        }
+    }
+}
+
+/// A locally tracked stack, summarized for display in the entry-point panel.
+#[derive(Debug, Clone, PartialEq)]
+pub struct StackSummary {
+    /// A human-readable label for the stack: its bottom branch, or
+    /// `bottom → top` when it has more than one layer.
+    pub label: String,
+    pub trunk: String,
+    pub layers: Vec<Layer>,
+    /// Whether the currently checked-out branch belongs to this stack.
+    pub is_current: bool,
+}
+
+impl StackSummary {
+    pub fn layer_count(&self) -> usize {
+        self.layers.len()
+    }
+
+    pub fn pr_counts(&self) -> PrCounts {
+        let mut counts = PrCounts::default();
+        for layer in &self.layers {
+            counts.record(layer);
+        }
+        counts
+    }
+}
+
+/// Enumerates every stack tracked locally in `repo`, hydrating each layer's
+/// pull request status from `gh pr view`.
+///
+/// `gh stack` has no command to list every local stack at once, so this
+/// reads `.git/gh-stack` directly (see [`super::local`]) and looks up each
+/// branch's pull request individually.
+pub async fn list_stacks(
+    shell: &impl Shell,
+    repo: &Path,
+) -> Result<Vec<StackSummary>, StackSummaryError> {
+    let local_stacks = read_local_stacks(repo)?;
+
+    let current_branch = shell
+        .run(repo, "git", &["rev-parse", "--abbrev-ref", "HEAD"])
+        .await
+        .map(|output| output.stdout.trim().to_string())
+        .unwrap_or_default();
+
+    let mut summaries = Vec::with_capacity(local_stacks.len());
+
+    for local_stack in local_stacks {
+        let mut layers = Vec::with_capacity(local_stack.branches.len());
+        let mut is_current = false;
+
+        for (position, branch) in local_stack.branches.iter().enumerate() {
+            let pull_request = hydrate_pull_request(shell, repo, &branch.branch).await?;
+            let branch_is_current = branch.branch == current_branch;
+            is_current |= branch_is_current;
+
+            let is_merged = pull_request.as_ref().is_some_and(|pr| pr.state == "MERGED");
+
+            layers.push(Layer {
+                branch: branch.branch.clone(),
+                head: None,
+                base: branch.base.clone(),
+                is_current: branch_is_current,
+                is_merged,
+                is_queued: false,
+                needs_rebase: false,
+                pull_request,
+                commits: Vec::new(),
+                position,
+            });
+        }
+
+        let label = match (layers.first(), layers.last()) {
+            (Some(bottom), Some(top)) if bottom.branch != top.branch => {
+                format!("{} → {}", bottom.branch, top.branch)
+            }
+            (Some(bottom), _) => bottom.branch.clone(),
+            (None, _) => String::from("(empty stack)"),
+        };
+
+        summaries.push(StackSummary {
+            label,
+            trunk: local_stack.trunk.branch,
+            layers,
+            is_current,
+        });
+    }
+
+    Ok(summaries)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::shell::{MockShell, ShellOutput};
+
+    fn ok(stdout: &str) -> Result<ShellOutput, ShellError> {
+        Ok(ShellOutput {
+            stdout: stdout.to_string(),
+            stderr: String::new(),
+            exit_code: 0,
+        })
+    }
+
+    fn no_pr(branch: &str) -> Result<ShellOutput, ShellError> {
+        let _ = branch;
+        Err(ShellError::CommandFailed {
+            program: "gh".to_string(),
+            output: ShellOutput {
+                stdout: String::new(),
+                stderr: "no pull requests found".to_string(),
+                exit_code: 1,
+            },
+        })
+    }
+
+    fn write_local_stacks(repo: &Path, json: &str) {
+        std::fs::create_dir_all(repo.join(".git")).unwrap();
+        std::fs::write(repo.join(".git").join("gh-stack"), json).unwrap();
+    }
+
+    #[tokio::test]
+    async fn returns_empty_when_there_are_no_local_stacks() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(temp_dir.path().join(".git")).unwrap();
+        let shell =
+            MockShell::new().when("git", &["rev-parse", "--abbrev-ref", "HEAD"], ok("main"));
+
+        let summaries = list_stacks(&shell, temp_dir.path()).await.unwrap();
+
+        assert!(summaries.is_empty());
+    }
+
+    #[tokio::test]
+    async fn summarizes_a_stack_and_marks_it_current() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        write_local_stacks(
+            temp_dir.path(),
+            r#"{
+                "stacks": [
+                    {
+                        "trunk": { "branch": "main" },
+                        "branches": [
+                            { "branch": "layer-1", "base": "main" },
+                            { "branch": "layer-2", "base": "layer-1" }
+                        ]
+                    }
+                ]
+            }"#,
+        );
+
+        let shell = MockShell::new()
+            .when(
+                "git",
+                &["rev-parse", "--abbrev-ref", "HEAD"],
+                ok("layer-2"),
+            )
+            .when(
+                "gh",
+                &[
+                    "pr",
+                    "view",
+                    "layer-1",
+                    "--json",
+                    "number,url,state,title,isDraft,reviewDecision",
+                ],
+                ok(r#"{"number":1,"url":"u","state":"OPEN","title":"t","isDraft":false,"reviewDecision":""}"#),
+            )
+            .when(
+                "gh",
+                &[
+                    "pr",
+                    "view",
+                    "layer-2",
+                    "--json",
+                    "number,url,state,title,isDraft,reviewDecision",
+                ],
+                no_pr("layer-2"),
+            );
+
+        let summaries = list_stacks(&shell, temp_dir.path()).await.unwrap();
+
+        assert_eq!(summaries.len(), 1);
+        let summary = &summaries[0];
+        assert_eq!(summary.label, "layer-1 → layer-2");
+        assert_eq!(summary.trunk, "main");
+        assert_eq!(summary.layer_count(), 2);
+        assert!(summary.is_current);
+        assert!(!summary.layers[0].is_current);
+        assert!(summary.layers[1].is_current);
+
+        let counts = summary.pr_counts();
+        assert_eq!(counts.open, 1);
+        assert_eq!(counts.unsubmitted, 1);
+    }
+
+    #[tokio::test]
+    async fn a_stack_without_the_current_branch_is_not_current() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        write_local_stacks(
+            temp_dir.path(),
+            r#"{
+                "stacks": [
+                    {
+                        "trunk": { "branch": "main" },
+                        "branches": [ { "branch": "layer-1", "base": "main" } ]
+                    }
+                ]
+            }"#,
+        );
+
+        let shell = MockShell::new()
+            .when(
+                "git",
+                &["rev-parse", "--abbrev-ref", "HEAD"],
+                ok("unrelated-branch"),
+            )
+            .when(
+                "gh",
+                &[
+                    "pr",
+                    "view",
+                    "layer-1",
+                    "--json",
+                    "number,url,state,title,isDraft,reviewDecision",
+                ],
+                no_pr("layer-1"),
+            );
+
+        let summaries = list_stacks(&shell, temp_dir.path()).await.unwrap();
+
+        assert!(!summaries[0].is_current);
+        assert_eq!(summaries[0].label, "layer-1");
+    }
+}
