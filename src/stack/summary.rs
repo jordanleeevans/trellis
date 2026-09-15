@@ -103,9 +103,7 @@ pub async fn list_stacks(
             let branch_is_current = branch.branch == current_branch;
             is_current |= branch_is_current;
 
-            let is_merged = pull_request
-                .as_ref()
-                .is_some_and(|pr| pr.state == "MERGED");
+            let is_merged = pull_request.as_ref().is_some_and(|pr| pr.state == "MERGED");
 
             layers.push(Layer {
                 branch: branch.branch.clone(),

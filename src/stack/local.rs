@@ -64,7 +64,12 @@ pub fn read_local_stacks(repo: &Path) -> Result<Vec<LocalStack>, LocalStackError
     let contents = match std::fs::read_to_string(&path) {
         Ok(contents) => contents,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
-        Err(error) => return Err(LocalStackError::Read { path, source: error }),
+        Err(error) => {
+            return Err(LocalStackError::Read {
+                path,
+                source: error,
+            });
+        }
     };
 
     let file: StackFile =

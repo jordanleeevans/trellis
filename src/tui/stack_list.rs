@@ -1,6 +1,7 @@
+use crossterm::style;
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout};
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::{Color, Modifier, Style, Stylize};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, List, ListItem, Paragraph};
 
@@ -32,8 +33,12 @@ fn render_header(frame: &mut Frame, area: ratatui::layout::Rect) {
 fn render_list(frame: &mut Frame, area: ratatui::layout::Rect, app: &App) {
     if app.stacks.is_empty() {
         frame.render_widget(
-            Paragraph::new("No stacks found in this repository.")
-                .block(Block::default().borders(Borders::ALL)),
+            Paragraph::new("No stacks found in this repository.").block(
+                Block::default()
+                    .cyan()
+                    .borders(Borders::ALL)
+                    .border_type(ratatui::widgets::BorderType::Rounded),
+            ),
             area,
         );
         return;
@@ -46,7 +51,12 @@ fn render_list(frame: &mut Frame, area: ratatui::layout::Rect, app: &App) {
         .collect();
 
     let list = List::new(items)
-        .block(Block::default().borders(Borders::ALL))
+        .block(
+            Block::default()
+                .cyan()
+                .borders(Borders::ALL)
+                .border_type(ratatui::widgets::BorderType::Rounded),
+        )
         .highlight_style(Style::default().add_modifier(Modifier::REVERSED));
 
     let mut state = app.list_state;

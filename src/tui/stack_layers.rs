@@ -32,7 +32,11 @@ pub fn render(frame: &mut Frame, app: &App, index: usize) {
         header_area,
     );
 
-    let items: Vec<ListItem> = stack.layers.iter().map(|layer| ListItem::new(row(layer))).collect();
+    let items: Vec<ListItem> = stack
+        .layers
+        .iter()
+        .map(|layer| ListItem::new(row(layer)))
+        .collect();
     let list = List::new(items).block(Block::default().borders(Borders::ALL));
     frame.render_widget(list, list_area);
 
