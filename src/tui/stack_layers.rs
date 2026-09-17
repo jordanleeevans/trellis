@@ -34,7 +34,16 @@ fn render_header(frame: &mut Frame, area: Rect, stack: &StackSummary) {
 }
 
 fn render_footer(frame: &mut Frame, area: Rect) {
-    frame.render_widget(Paragraph::new("esc/q back"), area);
+    let content = Line::from(vec![
+        Span::styled("j/k", Style::default().add_modifier(Modifier::BOLD)),
+        Span::raw(" navigate  "),
+        Span::styled("O", Style::default().add_modifier(Modifier::BOLD)),
+        Span::raw(" open PR  "),
+        Span::styled("esc/q", Style::default().add_modifier(Modifier::BOLD)),
+        Span::raw(" back"),
+    ]);
+
+    frame.render_widget(Paragraph::new(content), area);
 }
 
 fn render_stack(frame: &mut Frame, area: Rect, stack: &StackSummary, list_state: &mut ListState) {

@@ -137,6 +137,21 @@ async fn handle_key(app: &mut App, code: KeyCode, shell: &impl Shell, repo: &Pat
                 KeyCode::Up | KeyCode::Char('k') => {
                     select_previous(&mut app.layer_list_state, layer_count)
                 }
+                KeyCode::Char('O') => {
+                    if let Some(layer_index) = app.layer_list_state.selected()
+                        && let Some(layer) = app
+                            .stacks
+                            .get(stack_index)
+                            .and_then(|stack| stack.layers.get(layer_index))
+                        && let Some(pr) = &layer.pull_request
+                    {
+                        let pr_number = pr.number.to_string();
+
+                        let _ = shell
+                            .run(repo, "gh", &["pr", "view", &pr_number, "--web"])
+                            .await;
+                    }
+                }
                 _ => {}
             }
         }
