@@ -53,13 +53,12 @@ fn render_list(frame: &mut Frame, area: ratatui::layout::Rect, app: &App) {
     let list = List::new(items)
         .block(
             Block::default()
-                .cyan()
                 .borders(Borders::ALL)
                 .border_type(ratatui::widgets::BorderType::Rounded),
         )
         .highlight_style(Style::default().add_modifier(Modifier::REVERSED));
 
-    let mut state = app.list_state;
+    let mut state = app.stack_list_state;
     frame.render_stateful_widget(list, area, &mut state);
 }
 
