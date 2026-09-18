@@ -3,7 +3,7 @@ use std::time::Duration;
 
 use crossterm::event::{self, Event, KeyCode, KeyEventKind};
 use ratatui::DefaultTerminal;
-use ratatui::widgets::ListState;
+use ratatui::Frame;
 
 use crate::shell::Shell;
 use crate::stack::{StackSummary, list_stacks};
@@ -16,39 +16,81 @@ use super::stack_list;
 pub enum Screen {
     /// The entry-point panel: every locally tracked stack.
     List,
-    /// The layer view for the stack at this index into [`App::stacks`].
+    /// The layer view for the stack at this index into [`AppState::stacks`].
     Layers(usize),
 }
 
-pub struct App {
-    pub stacks: Vec<StackSummary>,
-    pub stack_list_state: ListState,
-    pub layer_list_state: ListState,
-    pub screen: Screen,
-    pub status: Option<String>,
-    should_quit: bool,
+#[derive(Debug, Clone)]
+pub enum Action {
+    Quit,
+    RefreshStacks,
+    SelectNext,
+    SelectPrevious,
+    ShowLayers(usize),
+    ShowList,
+    OpenPullRequest {
+        stack_index: usize,
+        layer_index: usize,
+    },
+    StacksLoaded(Option<usize>),
+    SetStatus(String),
+    ClearStatus,
 }
 
-impl App {
+pub trait Component {
+    fn draw(&mut self, frame: &mut Frame, state: &AppState);
+    fn handle_key(&mut self, code: KeyCode, state: &AppState) -> Vec<Action>;
+    fn update(&mut self, action: &Action, state: &mut AppState);
+}
+
+pub struct AppState {
+    pub stacks: Vec<StackSummary>,
+    pub screen: Screen,
+    pub status: Option<String>,
+    pub(crate) should_quit: bool,
+}
+
+struct App {
+    state: AppState,
+    stack_list: stack_list::StackList,
+    stack_layers: stack_layers::StackLayers,
+}
+
+impl AppState {
     fn new() -> Self {
         Self {
             stacks: Vec::new(),
-            stack_list_state: ListState::default(),
-            layer_list_state: ListState::default(),
             screen: Screen::List,
             status: None,
             should_quit: false,
         }
     }
+}
+
+impl App {
+    fn new() -> Self {
+        Self {
+            state: AppState::new(),
+            stack_list: stack_list::StackList::new(),
+            stack_layers: stack_layers::StackLayers::new(),
+        }
+    }
 
     /// Reloads every locally tracked stack, preserving the current
     /// selection (by stack) where possible.
-    async fn refresh(&mut self, shell: &impl Shell, repo: &Path) {
-        let selected_label = self
-            .stack_list_state
-            .selected()
-            .and_then(|index| self.stacks.get(index))
-            .map(|stack| stack.label.clone());
+    async fn refresh(&mut self, shell: &impl Shell, repo: &Path) -> Vec<Action> {
+        let selected_label = match self.state.screen {
+            Screen::Layers(index) => self
+                .state
+                .stacks
+                .get(index)
+                .map(|stack| stack.label.clone()),
+            Screen::List => self
+                .stack_list
+                .selected_index()
+                .and_then(|index| self.state.stacks.get(index))
+                .map(|stack| stack.label.clone()),
+        };
 
         match list_stacks(shell, repo).await {
             Ok(stacks) => {
@@ -57,13 +99,127 @@ impl App {
                     .or_else(|| stacks.iter().position(|stack| stack.is_current))
                     .or(if stacks.is_empty() { None } else { Some(0) });
 
-                self.stacks = stacks;
-                self.stack_list_state.select(selected_index);
-                self.status = None;
+                self.state.stacks = stacks;
+                let mut actions = vec![Action::StacksLoaded(selected_index)];
+
+                if matches!(self.state.screen, Screen::Layers(_)) {
+                    if let Some(index) = selected_index {
+                        self.state.screen = Screen::Layers(index);
+                        actions.push(Action::ClearStatus);
+                    } else {
+                        self.state.screen = Screen::List;
+                        actions.push(Action::SetStatus(
+                            "selected stack is no longer available".to_string(),
+                        ));
+                    }
+                } else {
+                    actions.push(Action::ClearStatus);
+                }
+                actions
             }
-            Err(error) => {
-                self.status = Some(format!("failed to load stacks: {error}"));
+            Err(error) => vec![Action::SetStatus(format!("failed to load stacks: {error}"))],
+        }
+    }
+
+    fn draw(&mut self, frame: &mut Frame) {
+        match self.state.screen {
+            Screen::List => self.stack_list.draw(frame, &self.state),
+            Screen::Layers(_) => self.stack_layers.draw(frame, &self.state),
+        }
+    }
+
+    fn handle_key(&mut self, code: KeyCode) -> Vec<Action> {
+        match self.state.screen {
+            Screen::List => self.stack_list.handle_key(code, &self.state),
+            Screen::Layers(_) => self.stack_layers.handle_key(code, &self.state),
+        }
+    }
+
+    async fn dispatch_actions(&mut self, actions: Vec<Action>, shell: &impl Shell, repo: &Path) {
+        let mut pending = std::collections::VecDeque::from(actions);
+
+        while let Some(action) = pending.pop_front() {
+            let follow_ups = self.apply_action(&action, shell, repo).await;
+            self.stack_list.update(&action, &mut self.state);
+            self.stack_layers.update(&action, &mut self.state);
+            pending.extend(follow_ups);
+        }
+    }
+
+    async fn apply_action(
+        &mut self,
+        action: &Action,
+        shell: &impl Shell,
+        repo: &Path,
+    ) -> Vec<Action> {
+        match action {
+            Action::Quit => {
+                self.state.should_quit = true;
+                Vec::new()
             }
+            Action::RefreshStacks => self.refresh(shell, repo).await,
+            Action::ShowLayers(index) => {
+                if *index < self.state.stacks.len() {
+                    self.state.screen = Screen::Layers(*index);
+                    if self
+                        .state
+                        .status
+                        .as_deref()
+                        .is_some_and(|status| status.starts_with("failed to load stacks:"))
+                    {
+                        self.state.status = None;
+                    }
+                } else {
+                    self.state.screen = Screen::List;
+                    self.state.status = Some("selected stack is no longer available".to_string());
+                }
+                Vec::new()
+            }
+            Action::ShowList => {
+                self.state.screen = Screen::List;
+                Vec::new()
+            }
+            Action::OpenPullRequest {
+                stack_index,
+                layer_index,
+            } => {
+                if let Some(pr) = self
+                    .state
+                    .stacks
+                    .get(*stack_index)
+                    .and_then(|stack| stack.layers.get(*layer_index))
+                    .and_then(|layer| layer.pull_request.as_ref())
+                {
+                    let pr_number = pr.number.to_string();
+                    if let Err(error) = shell
+                        .run(repo, "gh", &["pr", "view", &pr_number, "--web"])
+                        .await
+                    {
+                        self.state.status = Some(format!("failed to open PR: {error}"));
+                    }
+                } else {
+                    self.state.status = Some("selected layer has no pull request".to_string());
+                }
+                Vec::new()
+            }
+            Action::SetStatus(message) => {
+                self.state.status = Some(message.clone());
+                Vec::new()
+            }
+            Action::ClearStatus => {
+                self.state.status = None;
+                Vec::new()
+            }
+            Action::StacksLoaded(_) => {
+                if let Screen::Layers(index) = self.state.screen
+                    && index >= self.state.stacks.len()
+                {
+                    self.state.screen = Screen::List;
+                    self.state.status = Some("selected stack is no longer available".to_string());
+                }
+                Vec::new()
+            }
+            Action::SelectNext | Action::SelectPrevious => Vec::new(),
         }
     }
 }
@@ -83,107 +239,20 @@ async fn run_app(
     repo: &Path,
 ) -> anyhow::Result<()> {
     let mut app = App::new();
-    app.refresh(shell, repo).await;
+    let initial_actions = app.refresh(shell, repo).await;
+    app.dispatch_actions(initial_actions, shell, repo).await;
 
-    while !app.should_quit {
-        terminal.draw(|frame| match app.screen {
-            Screen::List => stack_list::render(frame, &app),
-            Screen::Layers(index) => stack_layers::render(frame, &mut app, index),
-        })?;
+    while !app.state.should_quit {
+        terminal.draw(|frame| app.draw(frame))?;
 
         if event::poll(Duration::from_millis(100))?
             && let Event::Key(key) = event::read()?
             && key.kind == KeyEventKind::Press
         {
-            handle_key(&mut app, key.code, shell, repo).await;
+            let actions = app.handle_key(key.code);
+            app.dispatch_actions(actions, shell, repo).await;
         }
     }
 
     Ok(())
-}
-
-/// Handles key presses based on the currently rendered frame
-async fn handle_key(app: &mut App, code: KeyCode, shell: &impl Shell, repo: &Path) {
-    match app.screen {
-        Screen::List => match code {
-            KeyCode::Char('q') | KeyCode::Esc => app.should_quit = true,
-            KeyCode::Char('r') => app.refresh(shell, repo).await,
-            KeyCode::Down | KeyCode::Char('j') => {
-                select_next(&mut app.stack_list_state, app.stacks.len())
-            }
-            KeyCode::Up | KeyCode::Char('k') => {
-                select_previous(&mut app.stack_list_state, app.stacks.len())
-            }
-            KeyCode::Enter => {
-                if let Some(index) = app.stack_list_state.selected() {
-                    app.screen = Screen::Layers(index);
-                    app.layer_list_state.select(Some(0))
-                }
-            }
-            _ => {}
-        },
-        Screen::Layers(stack_index) => {
-            let layer_count = app
-                .stacks
-                .get(stack_index)
-                .map(|stack| stack.layers.len())
-                .unwrap_or(0);
-
-            match code {
-                KeyCode::Char('q') | KeyCode::Esc => app.screen = Screen::List,
-                KeyCode::Down | KeyCode::Char('j') => {
-                    select_next(&mut app.layer_list_state, layer_count)
-                }
-                KeyCode::Up | KeyCode::Char('k') => {
-                    select_previous(&mut app.layer_list_state, layer_count)
-                }
-                KeyCode::Char('O') => {
-                    if let Some(layer_index) = app.layer_list_state.selected()
-                        && let Some(layer) = app
-                            .stacks
-                            .get(stack_index)
-                            .and_then(|stack| stack.layers.get(layer_index))
-                        && let Some(pr) = &layer.pull_request
-                    {
-                        let pr_number = pr.number.to_string();
-
-                        let _ = shell
-                            .run(repo, "gh", &["pr", "view", &pr_number, "--web"])
-                            .await;
-                    }
-                }
-                _ => {}
-            }
-        }
-    };
-}
-
-/// Selects the next element in [ListState]
-fn select_next(state: &mut ListState, count: usize) {
-    if count == 0 {
-        state.select(None);
-        return;
-    }
-
-    let next = match state.selected() {
-        Some(index) if index + 1 < count => index + 1,
-        _ => 0,
-    };
-
-    state.select(Some(next));
-}
-
-/// Selects the previous element in [ListState]
-fn select_previous(state: &mut ListState, count: usize) {
-    if count == 0 {
-        state.select(None);
-        return;
-    }
-
-    let previous = match state.selected() {
-        Some(0) | None => count - 1,
-        Some(index) => index - 1,
-    };
-
-    state.select(Some(previous))
 }
