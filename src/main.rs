@@ -4,6 +4,8 @@ mod doctor;
 mod git;
 mod shell;
 mod stack;
+#[cfg(test)]
+mod test_fixtures;
 mod tui;
 
 use anyhow::Result;

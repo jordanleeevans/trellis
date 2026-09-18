@@ -298,6 +298,7 @@ mod tests {
             ],
             screen: Screen::List,
             status: None,
+            layer_detail_cache: Default::default(),
             should_quit: false,
         }
     }

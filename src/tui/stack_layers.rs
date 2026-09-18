@@ -5,8 +5,8 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Borders, List, ListItem, ListState, Paragraph, Wrap};
 
-use crate::stack::{Layer, StackSummary};
-use crate::tui::app::{Action, AppState, Component, Screen};
+use crate::stack::{Layer, LayerDetail, StackSummary};
+use crate::tui::app::{Action, AppState, Component, Screen, layer_detail_cache_key};
 
 pub struct StackLayers {
     list_state: ListState,
@@ -19,6 +19,10 @@ impl StackLayers {
             list_state: ListState::default(),
             active_stack_label: None,
         }
+    }
+
+    pub fn selected_index(&self) -> Option<usize> {
+        self.list_state.selected()
     }
 }
 
@@ -36,7 +40,7 @@ fn render(frame: &mut Frame, state: &AppState, list_state: &mut ListState, index
     };
 
     render_header(frame, header_area, stack);
-    render_stack(frame, content_area, stack, list_state);
+    render_stack(frame, content_area, state, stack, list_state);
     render_footer(frame, footer_area);
 }
 
@@ -70,6 +74,8 @@ fn render_footer(frame: &mut Frame, area: Rect) {
         Span::raw(" navigate  "),
         Span::styled("O", Style::default().add_modifier(Modifier::BOLD)),
         Span::raw(" open PR  "),
+        Span::styled("r", Style::default().add_modifier(Modifier::BOLD)),
+        Span::raw(" refresh detail  "),
         Span::styled("esc/q", Style::default().add_modifier(Modifier::BOLD)),
         Span::raw(" back"),
     ]);
@@ -77,7 +83,13 @@ fn render_footer(frame: &mut Frame, area: Rect) {
     frame.render_widget(Paragraph::new(content), area);
 }
 
-fn render_stack(frame: &mut Frame, area: Rect, stack: &StackSummary, list_state: &mut ListState) {
+fn render_stack(
+    frame: &mut Frame,
+    area: Rect,
+    state: &AppState,
+    stack: &StackSummary,
+    list_state: &mut ListState,
+) {
     let [list_area, detail_area] = Layout::new(
         Direction::Horizontal,
         [Constraint::Percentage(50), Constraint::Percentage(50)],
@@ -113,12 +125,13 @@ fn render_stack(frame: &mut Frame, area: Rect, stack: &StackSummary, list_state:
 
     frame.render_stateful_widget(list, list_area, list_state);
 
-    render_layer_detail(frame, detail_area, stack, list_state.selected());
+    render_layer_detail(frame, detail_area, state, stack, list_state.selected());
 }
 
 fn render_layer_detail(
     frame: &mut Frame,
     area: Rect,
+    state: &AppState,
     stack: &StackSummary,
     selected: Option<usize>,
 ) {
@@ -147,8 +160,6 @@ fn render_layer_detail(
         return;
     };
 
-    let pr = layer.pull_request.as_ref();
-
     let rebase_status = if layer.needs_rebase {
         Span::styled(
             "Needs rebase",
@@ -174,82 +185,140 @@ fn render_layer_detail(
         .border_type(BorderType::Rounded)
         .border_style(Style::default().fg(Color::Magenta));
 
-    let inner = detail_block.inner(area);
+    let detail = state
+        .layer_detail_cache
+        .get(&layer_detail_cache_key(stack, layer));
+    let lines = detail_lines(layer, rebase_status, detail);
 
-    frame.render_widget(detail_block, area);
-
-    let rows = Layout::vertical([
-        Constraint::Length(1),
-        Constraint::Length(1),
-        Constraint::Length(1),
-        Constraint::Length(1),
-        Constraint::Min(1),
-    ])
-    .split(inner);
-
-    render_detail_row(
-        frame,
-        rows[0],
-        "Branch",
-        Paragraph::new(layer.branch.as_str()).wrap(Wrap { trim: false }),
-    );
-
-    render_detail_row(
-        frame,
-        rows[1],
-        "Status",
-        Paragraph::new(Line::from(rebase_status)),
-    );
-
-    render_detail_row(
-        frame,
-        rows[2],
-        "Base",
-        Paragraph::new(layer.base.as_str()).wrap(Wrap { trim: false }),
-    );
-
-    render_detail_row(
-        frame,
-        rows[3],
-        "Head",
-        Paragraph::new(layer.head.as_deref().unwrap_or("Unknown")).wrap(Wrap { trim: false }),
-    );
-
-    let pr_content = vec![
-        Line::from(
-            pr.map(|pr| format!("#{} {}", pr.number, pr.state))
-                .unwrap_or_else(|| "Not submitted".to_string()),
-        ),
-        Line::from(Span::styled(
-            pr.map(|pr| pr.url.as_str()).unwrap_or("Not submitted"),
-            Style::default()
-                .fg(Color::Blue)
-                .add_modifier(Modifier::UNDERLINED),
-        )),
-    ];
-
-    render_detail_row(
-        frame,
-        rows[4],
-        "PR",
-        Paragraph::new(pr_content).wrap(Wrap { trim: false }),
+    frame.render_widget(
+        Paragraph::new(lines)
+            .block(detail_block)
+            .wrap(Wrap { trim: false }),
+        area,
     );
 }
 
-fn render_detail_row<'a>(frame: &mut Frame, area: Rect, label: &'a str, value: Paragraph<'a>) {
-    let [label_area, value_area] =
-        Layout::horizontal([Constraint::Length(10), Constraint::Min(0)]).areas(area);
-
-    frame.render_widget(
-        Paragraph::new(label).style(
-            Style::default()
-                .fg(Color::DarkGray)
-                .add_modifier(Modifier::BOLD),
+fn detail_lines(
+    layer: &Layer,
+    rebase_status: Span<'static>,
+    detail: Option<&LayerDetail>,
+) -> Vec<Line<'static>> {
+    let pr = layer.pull_request.as_ref();
+    let mut lines = vec![
+        labeled_line("Branch", layer.branch.clone()),
+        Line::from(vec![label_span("Status"), rebase_status]),
+        labeled_line("Base", layer.base.clone()),
+        labeled_line("Head", layer.head.clone().unwrap_or_else(|| "Unknown".to_string())),
+        labeled_line(
+            "PR",
+            pr.map(|pr| format!("#{} {}", pr.number, pr.state))
+                .unwrap_or_else(|| "Not submitted".to_string()),
         ),
-        label_area,
-    );
+    ];
 
-    frame.render_widget(value, value_area);
+    if let Some(pr) = pr {
+        lines.push(Line::from(vec![
+            label_span("URL"),
+            Span::styled(
+                pr.url.clone(),
+                Style::default()
+                    .fg(Color::Blue)
+                    .add_modifier(Modifier::UNDERLINED),
+            ),
+        ]));
+    }
+
+    let Some(detail) = detail else {
+        if pr.is_some() {
+            lines.push(Line::from(""));
+            lines.push(Line::from(Span::styled(
+                "Detail not loaded yet.",
+                Style::default().fg(Color::DarkGray),
+            )));
+        }
+        return lines;
+    };
+
+    lines.push(Line::from(""));
+    lines.push(labeled_line("Title", detail.pull_request.title.clone()));
+
+    if let Some(snippet) = &detail.pull_request.description_snippet {
+        lines.push(labeled_line("Summary", snippet.clone()));
+    }
+
+    lines.push(labeled_line(
+        "Labels",
+        list_or_dash(&detail.pull_request.labels),
+    ));
+    lines.push(labeled_line(
+        "Reviewers",
+        reviewers_text(&detail.pull_request.reviewers),
+    ));
+
+    let checks = detail.pull_request.checks;
+    lines.push(labeled_line(
+        "Checks",
+        format!(
+            "{} total, {} pass, {} fail, {} pending",
+            checks.total, checks.passing, checks.failing, checks.pending
+        ),
+    ));
+
+    lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled(
+        "Commits",
+        Style::default()
+            .fg(Color::DarkGray)
+            .add_modifier(Modifier::BOLD),
+    )));
+
+    if detail.commits.is_empty() {
+        lines.push(Line::from("  -"));
+    } else {
+        for commit in &detail.commits {
+            let short_hash = commit.oid.chars().take(7).collect::<String>();
+            let author = commit.author.as_deref().unwrap_or("unknown");
+            lines.push(Line::from(format!(
+                "  {short_hash}  {}  {author}  {}",
+                commit.subject, commit.authored_at
+            )));
+        }
+    }
+
+    lines
+}
+
+fn labeled_line(label: &str, value: String) -> Line<'static> {
+    Line::from(vec![label_span(label), Span::raw(value)])
+}
+
+fn label_span(label: &str) -> Span<'static> {
+    Span::styled(
+        format!("{label:<10}"),
+        Style::default()
+            .fg(Color::DarkGray)
+            .add_modifier(Modifier::BOLD),
+    )
+}
+
+fn list_or_dash(values: &[String]) -> String {
+    if values.is_empty() {
+        "-".to_string()
+    } else {
+        values.join(", ")
+    }
+}
+
+fn reviewers_text(reviewers: &[crate::stack::ReviewerState]) -> String {
+    if reviewers.is_empty() {
+        return "-".to_string();
+    }
+
+    reviewers
+        .iter()
+        .map(|reviewer| format!("{} {}", reviewer.login, reviewer.state))
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 fn row(layer: &Layer) -> Line<'static> {
@@ -299,6 +368,17 @@ impl Component for StackLayers {
             KeyCode::Char('q') | KeyCode::Esc => vec![Action::ShowList],
             KeyCode::Down | KeyCode::Char('j') => vec![Action::SelectNext],
             KeyCode::Up | KeyCode::Char('k') => vec![Action::SelectPrevious],
+            KeyCode::Char('r') => self
+                .list_state
+                .selected()
+                .map(|layer_index| {
+                    vec![Action::LoadLayerDetail {
+                        stack_index,
+                        layer_index,
+                        force: true,
+                    }]
+                })
+                .unwrap_or_default(),
             KeyCode::Char('O') => self
                 .list_state
                 .selected()
@@ -414,38 +494,17 @@ fn select_previous(state: &mut ListState, count: usize) {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn layer(name: &str) -> Layer {
-        Layer {
-            branch: name.to_string(),
-            head: None,
-            base: "main".to_string(),
-            is_current: false,
-            is_merged: false,
-            is_queued: false,
-            needs_rebase: false,
-            pull_request: None,
-            commits: Vec::new(),
-            position: 0,
-        }
-    }
-
-    fn stack(label: &str, layer_count: usize) -> StackSummary {
-        StackSummary {
-            label: label.to_string(),
-            trunk: "main".to_string(),
-            layers: (0..layer_count)
-                .map(|index| layer(&format!("{label}-layer-{index}")))
-                .collect(),
-            is_current: false,
-        }
-    }
+    use crate::stack::{
+        CheckSummary, LayerCommit, LayerDetail, PullRequestDetail, PullRequestRef, ReviewerState,
+    };
+    use crate::test_fixtures::stack_summary;
 
     fn app_state(stacks: Vec<StackSummary>, screen: Screen) -> AppState {
         AppState {
             stacks,
             screen,
             status: None,
+            layer_detail_cache: Default::default(),
             should_quit: false,
         }
     }
@@ -453,7 +512,7 @@ mod tests {
     #[test]
     fn show_layers_preserves_selection_for_same_stack() {
         let mut component = StackLayers::new();
-        let mut state = app_state(vec![stack("a", 3)], Screen::Layers(0));
+        let mut state = app_state(vec![stack_summary("a", 3)], Screen::Layers(0));
 
         component.update(&Action::ShowLayers(0), &mut state);
         component.update(&Action::SelectNext, &mut state);
@@ -465,7 +524,10 @@ mod tests {
     #[test]
     fn show_layers_resets_selection_when_switching_stacks() {
         let mut component = StackLayers::new();
-        let mut state = app_state(vec![stack("a", 3), stack("b", 3)], Screen::Layers(0));
+        let mut state = app_state(
+            vec![stack_summary("a", 3), stack_summary("b", 3)],
+            Screen::Layers(0),
+        );
 
         component.update(&Action::ShowLayers(0), &mut state);
         component.update(&Action::SelectNext, &mut state);
@@ -477,11 +539,11 @@ mod tests {
     #[test]
     fn stacks_loaded_preserves_selection_for_same_stack_label() {
         let mut component = StackLayers::new();
-        let mut state = app_state(vec![stack("a", 3)], Screen::Layers(0));
+        let mut state = app_state(vec![stack_summary("a", 3)], Screen::Layers(0));
 
         component.update(&Action::ShowLayers(0), &mut state);
         component.update(&Action::SelectNext, &mut state);
-        state.stacks = vec![stack("x", 1), stack("a", 3)];
+        state.stacks = vec![stack_summary("x", 1), stack_summary("a", 3)];
         state.screen = Screen::Layers(1);
         component.update(&Action::StacksLoaded(Some(1)), &mut state);
 
@@ -491,11 +553,11 @@ mod tests {
     #[test]
     fn stacks_loaded_resets_selection_for_different_stack_label() {
         let mut component = StackLayers::new();
-        let mut state = app_state(vec![stack("a", 3)], Screen::Layers(0));
+        let mut state = app_state(vec![stack_summary("a", 3)], Screen::Layers(0));
 
         component.update(&Action::ShowLayers(0), &mut state);
         component.update(&Action::SelectNext, &mut state);
-        state.stacks = vec![stack("b", 3)];
+        state.stacks = vec![stack_summary("b", 3)];
         state.screen = Screen::Layers(0);
         component.update(&Action::StacksLoaded(Some(0)), &mut state);
 
@@ -505,21 +567,31 @@ mod tests {
     #[test]
     fn handle_key_maps_navigation_actions() {
         let mut component = StackLayers::new();
-        let state = app_state(vec![stack("a", 3)], Screen::Layers(0));
+        let mut state = app_state(vec![stack_summary("a", 3)], Screen::Layers(0));
+        component.update(&Action::ShowLayers(0), &mut state);
 
         let quit = component.handle_key(KeyCode::Char('q'), &state);
         let next = component.handle_key(KeyCode::Down, &state);
         let previous = component.handle_key(KeyCode::Up, &state);
+        let refresh = component.handle_key(KeyCode::Char('r'), &state);
 
         assert!(matches!(quit.as_slice(), [Action::ShowList]));
         assert!(matches!(next.as_slice(), [Action::SelectNext]));
         assert!(matches!(previous.as_slice(), [Action::SelectPrevious]));
+        assert!(matches!(
+            refresh.as_slice(),
+            [Action::LoadLayerDetail {
+                stack_index: 0,
+                layer_index: 0,
+                force: true,
+            }]
+        ));
     }
 
     #[test]
     fn handle_key_dispatches_open_pr_for_selected_layer() {
         let mut component = StackLayers::new();
-        let mut state = app_state(vec![stack("a", 3)], Screen::Layers(0));
+        let mut state = app_state(vec![stack_summary("a", 3)], Screen::Layers(0));
         component.update(&Action::ShowLayers(0), &mut state);
         component.update(&Action::SelectNext, &mut state);
 
@@ -531,5 +603,64 @@ mod tests {
                 layer_index: 1
             }]
         ));
+    }
+
+    #[test]
+    fn detail_lines_include_cached_layer_detail() {
+        let mut layer = crate::test_fixtures::layer("feature/layer-1");
+        layer.pull_request = Some(PullRequestRef {
+            number: 42,
+            url: "https://example.test/pull/42".to_string(),
+            state: "OPEN".to_string(),
+            title: None,
+            is_draft: None,
+            checks_status: None,
+            review_decision: None,
+        });
+        let detail = LayerDetail {
+            commits: vec![LayerCommit {
+                oid: "abcdef123456".to_string(),
+                subject: "feat: render details".to_string(),
+                author: Some("john-doe".to_string()),
+                authored_at: "2026-09-18T10:00:00Z".to_string(),
+            }],
+            pull_request: PullRequestDetail {
+                title: "Layer detail pane".to_string(),
+                description_snippet: Some("Shows the selected layer.".to_string()),
+                reviewers: vec![ReviewerState {
+                    login: "octocat".to_string(),
+                    state: "APPROVED".to_string(),
+                }],
+                checks: CheckSummary {
+                    total: 2,
+                    passing: 1,
+                    failing: 0,
+                    pending: 1,
+                },
+                labels: vec!["tui".to_string()],
+            },
+        };
+
+        let text = detail_lines(
+            &layer,
+            Span::raw("Up to date"),
+            Some(&detail),
+        )
+        .iter()
+        .map(|line| {
+            line.spans
+                .iter()
+                .map(|span| span.content.as_ref())
+                .collect::<String>()
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+
+        assert!(text.contains("Layer detail pane"));
+        assert!(text.contains("Shows the selected layer."));
+        assert!(text.contains("tui"));
+        assert!(text.contains("octocat APPROVED"));
+        assert!(text.contains("2 total, 1 pass, 0 fail, 1 pending"));
+        assert!(text.contains("abcdef1  feat: render details  john-doe"));
     }
 }

@@ -2,6 +2,7 @@
 //! `gh stack view --json` and supplemented by `gh pr view --json`.
 
 mod commit;
+mod detail;
 mod layer;
 pub mod local;
 mod pull_request;
@@ -9,6 +10,9 @@ mod stack;
 mod summary;
 
 pub use commit::CommitInfo;
+pub use detail::{
+    CheckSummary, LayerCommit, LayerDetail, PullRequestDetail, ReviewerState, hydrate_layer_detail,
+};
 pub use layer::Layer;
 pub use pull_request::PullRequestRef;
 pub use stack::Stack;

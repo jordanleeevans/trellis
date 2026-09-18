@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::path::Path;
 use std::time::Duration;
 
@@ -6,7 +7,7 @@ use ratatui::DefaultTerminal;
 use ratatui::Frame;
 
 use crate::shell::Shell;
-use crate::stack::{StackSummary, list_stacks};
+use crate::stack::{Layer, LayerDetail, StackSummary, hydrate_layer_detail, list_stacks};
 
 use super::stack_layers;
 use super::stack_list;
@@ -32,6 +33,11 @@ pub enum Action {
         stack_index: usize,
         layer_index: usize,
     },
+    LoadLayerDetail {
+        stack_index: usize,
+        layer_index: usize,
+        force: bool,
+    },
     StacksLoaded(Option<usize>),
     SetStatus(String),
     ClearStatus,
@@ -47,6 +53,7 @@ pub struct AppState {
     pub stacks: Vec<StackSummary>,
     pub screen: Screen,
     pub status: Option<String>,
+    pub layer_detail_cache: HashMap<String, LayerDetail>,
     pub(crate) should_quit: bool,
 }
 
@@ -62,6 +69,7 @@ impl AppState {
             stacks: Vec::new(),
             screen: Screen::List,
             status: None,
+            layer_detail_cache: HashMap::new(),
             should_quit: false,
         }
     }
@@ -143,6 +151,17 @@ impl App {
             self.stack_list.update(&action, &mut self.state);
             self.stack_layers.update(&action, &mut self.state);
             pending.extend(follow_ups);
+
+            if matches!(action, Action::SelectNext | Action::SelectPrevious)
+                && let Screen::Layers(stack_index) = self.state.screen
+                && let Some(layer_index) = self.stack_layers.selected_index()
+            {
+                pending.push_back(Action::LoadLayerDetail {
+                    stack_index,
+                    layer_index,
+                    force: false,
+                });
+            }
         }
     }
 
@@ -169,11 +188,17 @@ impl App {
                     {
                         self.state.status = None;
                     }
+
+                    vec![Action::LoadLayerDetail {
+                        stack_index: *index,
+                        layer_index: 0,
+                        force: false,
+                    }]
                 } else {
                     self.state.screen = Screen::List;
                     self.state.status = Some("selected stack is no longer available".to_string());
+                    Vec::new()
                 }
-                Vec::new()
             }
             Action::ShowList => {
                 self.state.screen = Screen::List;
@@ -200,6 +225,41 @@ impl App {
                 } else {
                     self.state.status = Some("selected layer has no pull request".to_string());
                 }
+                Vec::new()
+            }
+            Action::LoadLayerDetail {
+                stack_index,
+                layer_index,
+                force,
+            } => {
+                let Some(stack) = self.state.stacks.get(*stack_index) else {
+                    self.state.status = Some("selected stack is no longer available".to_string());
+                    return Vec::new();
+                };
+
+                let Some(layer) = stack.layers.get(*layer_index) else {
+                    self.state.status = Some("selected layer is no longer available".to_string());
+                    return Vec::new();
+                };
+
+                if layer.pull_request.is_none() {
+                    return Vec::new();
+                }
+
+                let cache_key = layer_detail_cache_key(stack, layer);
+                if !force && self.state.layer_detail_cache.contains_key(&cache_key) {
+                    return Vec::new();
+                }
+
+                match hydrate_layer_detail(shell, repo, &layer.branch).await {
+                    Ok(detail) => {
+                        self.state.layer_detail_cache.insert(cache_key, detail);
+                    }
+                    Err(error) => {
+                        self.state.status = Some(format!("failed to load layer detail: {error}"));
+                    }
+                }
+
                 Vec::new()
             }
             Action::SetStatus(message) => {
@@ -255,4 +315,48 @@ async fn run_app(
     }
 
     Ok(())
+}
+
+pub fn layer_detail_cache_key(stack: &StackSummary, layer: &Layer) -> String {
+    format!("{}::{}", stack.label, layer.branch)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::shell::MockShell;
+    use crate::test_fixtures::{layer, stack_summary};
+
+    #[test]
+    fn layer_detail_cache_key_includes_stack_and_branch() {
+        let stack = stack_summary("stack-a", 1);
+        let layer = layer("feature/layer-1");
+
+        assert_eq!(
+            layer_detail_cache_key(&stack, &layer),
+            "stack-a::feature/layer-1"
+        );
+    }
+
+    #[tokio::test]
+    async fn show_layers_loads_first_layer_detail() {
+        let repo = std::env::current_dir().unwrap();
+        let shell = MockShell::new();
+        let mut app = App::new();
+        app.state.stacks = vec![stack_summary("stack-a", 2)];
+
+        let follow_ups = app
+            .apply_action(&Action::ShowLayers(0), &shell, repo.as_path())
+            .await;
+
+        assert!(matches!(app.state.screen, Screen::Layers(0)));
+        assert!(matches!(
+            follow_ups.as_slice(),
+            [Action::LoadLayerDetail {
+                stack_index: 0,
+                layer_index: 0,
+                force: false,
+            }]
+        ));
+    }
 }
