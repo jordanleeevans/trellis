@@ -6,6 +6,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Borders, List, ListItem, ListState, Paragraph, Wrap};
 
 use crate::stack::{Layer, LayerDetail, StackSummary};
+use crate::theme::glyphs::{GlyphSet, NERD_FONT};
 use crate::tui::app::{Action, AppState, Component, Screen, layer_detail_cache_key};
 
 pub struct StackLayers {
@@ -121,7 +122,7 @@ fn render_stack(
                 .bg(Color::LightMagenta)
                 .add_modifier(Modifier::BOLD),
         )
-        .highlight_symbol("▶ ");
+        .highlight_symbol(format!("{} ", glyphs().current));
 
     frame.render_stateful_widget(list, list_area, list_state);
 
@@ -208,10 +209,14 @@ fn detail_lines(
         labeled_line("Branch", layer.branch.clone()),
         Line::from(vec![label_span("Status"), rebase_status]),
         labeled_line("Base", layer.base.clone()),
-        labeled_line("Head", layer.head.clone().unwrap_or_else(|| "Unknown".to_string())),
+        labeled_line(
+            "Head",
+            layer.head.clone().unwrap_or_else(|| "Unknown".to_string()),
+        ),
         labeled_line(
             "PR",
             pr.map(|pr| format!("#{} {}", pr.number, pr.state))
+                .map(|text| format!("{} {text}", glyphs().pull_request))
                 .unwrap_or_else(|| "Not submitted".to_string()),
         ),
     ];
@@ -321,8 +326,16 @@ fn reviewers_text(reviewers: &[crate::stack::ReviewerState]) -> String {
         .join(", ")
 }
 
+fn glyphs() -> &'static GlyphSet {
+    &NERD_FONT
+}
+
 fn row(layer: &Layer) -> Line<'static> {
-    let marker = if layer.is_current { "* " } else { "  " };
+    let marker = if layer.is_current {
+        format!("{} ", glyphs().current)
+    } else {
+        "  ".to_string()
+    };
 
     let mut style = Style::default();
 
@@ -332,13 +345,18 @@ fn row(layer: &Layer) -> Line<'static> {
 
     let status = match &layer.pull_request {
         Some(pr) if layer.is_merged => {
-            format!("#{} merged", pr.number)
+            format!("{} #{} merged", glyphs().pull_request_merged, pr.number)
         }
         Some(pr) if pr.is_draft == Some(true) => {
-            format!("#{} draft", pr.number)
+            format!("{} #{} draft", glyphs().pull_request_open, pr.number)
         }
         Some(pr) => {
-            format!("#{} {}", pr.number, pr.state.to_lowercase())
+            format!(
+                "{} #{} {}",
+                glyphs().pull_request_open,
+                pr.number,
+                pr.state.to_lowercase()
+            )
         }
         None => "not submitted".to_string(),
     };
@@ -641,20 +659,16 @@ mod tests {
             },
         };
 
-        let text = detail_lines(
-            &layer,
-            Span::raw("Up to date"),
-            Some(&detail),
-        )
-        .iter()
-        .map(|line| {
-            line.spans
-                .iter()
-                .map(|span| span.content.as_ref())
-                .collect::<String>()
-        })
-        .collect::<Vec<_>>()
-        .join("\n");
+        let text = detail_lines(&layer, Span::raw("Up to date"), Some(&detail))
+            .iter()
+            .map(|line| {
+                line.spans
+                    .iter()
+                    .map(|span| span.content.as_ref())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
 
         assert!(text.contains("Layer detail pane"));
         assert!(text.contains("Shows the selected layer."));

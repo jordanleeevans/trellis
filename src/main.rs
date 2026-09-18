@@ -6,6 +6,7 @@ mod shell;
 mod stack;
 #[cfg(test)]
 mod test_fixtures;
+mod theme;
 mod tui;
 
 use anyhow::Result;

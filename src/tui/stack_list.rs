@@ -7,6 +7,7 @@ use ratatui::widgets::ListState;
 use ratatui::widgets::{Block, BorderType, Borders, List, ListItem, Paragraph};
 
 use crate::stack::{PrCounts, StackSummary};
+use crate::theme::glyphs::{GlyphSet, NERD_FONT};
 
 use super::app::{Action, AppState, Component, Screen};
 
@@ -116,13 +117,17 @@ fn render_list(
                 .bg(Color::LightMagenta)
                 .add_modifier(Modifier::BOLD),
         )
-        .highlight_symbol("▶ ");
+        .highlight_symbol(format!("{} ", glyphs().current));
 
     frame.render_stateful_widget(list, area, list_state);
 }
 
 fn row(stack: &StackSummary) -> Line<'static> {
-    let marker = if stack.is_current { "* " } else { "  " };
+    let marker = if stack.is_current {
+        format!("{} ", glyphs().current)
+    } else {
+        "  ".to_string()
+    };
 
     let mut style = Style::default();
     if stack.is_current {
@@ -171,7 +176,7 @@ fn render_footer(frame: &mut Frame, area: Rect, state: &AppState) {
     let text = state.status.clone().map(Line::from).unwrap_or_else(|| {
         Line::from(vec![
             Span::styled(
-                "↑/↓",
+                format!("{}/{}", glyphs().up, glyphs().down),
                 Style::default()
                     .fg(Color::LightCyan)
                     .add_modifier(Modifier::BOLD),
@@ -211,6 +216,10 @@ fn render_footer(frame: &mut Frame, area: Rect, state: &AppState) {
             ),
         area,
     );
+}
+
+fn glyphs() -> &'static GlyphSet {
+    &NERD_FONT
 }
 
 impl Component for StackList {
