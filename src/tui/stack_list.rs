@@ -1,15 +1,17 @@
 use crossterm::event::KeyCode;
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::ListState;
 use ratatui::widgets::{Block, BorderType, Borders, List, ListItem, Paragraph};
 
 use crate::stack::{PrCounts, StackSummary};
 use crate::theme::glyphs::{GlyphSet, NERD_FONT};
+use crate::theme::ui::THEME;
 
 use super::app::{Action, AppState, Component, Screen};
+use super::keymap::{KeyIntent, key_intent};
 
 pub struct StackList {
     list_state: ListState,
@@ -46,22 +48,19 @@ fn render_header(frame: &mut Frame, area: Rect) {
         .title(Line::from(vec![
             Span::styled(
                 " Trellis ",
-                Style::default().fg(Color::Black).bg(Color::Cyan),
-            ),
-            Span::styled(
-                " stacks",
                 Style::default()
-                    .fg(Color::Magenta)
-                    .add_modifier(Modifier::BOLD),
+                    .fg(THEME.colors.text_inverse)
+                    .bg(THEME.colors.primary),
             ),
+            Span::styled(" stacks", THEME.text.heading.fg(THEME.colors.secondary)),
         ]))
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
-        .border_style(Style::default().fg(Color::Cyan));
+        .border_style(THEME.primary_border());
 
     frame.render_widget(
         Paragraph::new("Browse locally tracked stacks and layer status")
-            .style(Style::default().fg(Color::Gray))
+            .style(THEME.text.body)
             .block(header),
         area,
     );
@@ -79,13 +78,11 @@ fn render_list(
                 Block::default()
                     .title(Span::styled(
                         " empty ",
-                        Style::default()
-                            .fg(Color::Yellow)
-                            .add_modifier(Modifier::BOLD),
+                        THEME.text.heading.fg(THEME.colors.warning),
                     ))
                     .borders(Borders::ALL)
                     .border_type(BorderType::Rounded)
-                    .border_style(Style::default().fg(Color::Yellow)),
+                    .border_style(Style::default().fg(THEME.colors.warning)),
             ),
             area,
         );
@@ -101,22 +98,12 @@ fn render_list(
     let list = List::new(items)
         .block(
             Block::default()
-                .title(Span::styled(
-                    " tracked stacks ",
-                    Style::default()
-                        .fg(Color::Cyan)
-                        .add_modifier(Modifier::BOLD),
-                ))
+                .title(Span::styled(" tracked stacks ", THEME.text.heading))
                 .borders(Borders::ALL)
                 .border_type(BorderType::Rounded)
-                .border_style(Style::default().fg(Color::Blue)),
+                .border_style(THEME.tertiary_border()),
         )
-        .highlight_style(
-            Style::default()
-                .fg(Color::Black)
-                .bg(Color::LightMagenta)
-                .add_modifier(Modifier::BOLD),
-        )
+        .highlight_style(THEME.text.selected)
         .highlight_symbol(format!("{} ", glyphs().current));
 
     frame.render_stateful_widget(list, area, list_state);
@@ -131,7 +118,7 @@ fn row(stack: &StackSummary) -> Line<'static> {
 
     let mut style = Style::default();
     if stack.is_current {
-        style = style.fg(Color::Green).add_modifier(Modifier::BOLD);
+        style = style.fg(THEME.colors.success).add_modifier(Modifier::BOLD);
     }
 
     let text = format!(
@@ -175,45 +162,23 @@ fn describe(counts: &PrCounts) -> String {
 fn render_footer(frame: &mut Frame, area: Rect, state: &AppState) {
     let text = state.status.clone().map(Line::from).unwrap_or_else(|| {
         Line::from(vec![
-            Span::styled(
-                format!("{}/{}", glyphs().up, glyphs().down),
-                Style::default()
-                    .fg(Color::LightCyan)
-                    .add_modifier(Modifier::BOLD),
-            ),
+            Span::styled(format!("{}/{}", glyphs().up, glyphs().down), THEME.text.key),
             Span::raw(" select  "),
-            Span::styled(
-                "enter",
-                Style::default()
-                    .fg(Color::LightGreen)
-                    .add_modifier(Modifier::BOLD),
-            ),
+            Span::styled("enter", THEME.text.key.fg(THEME.colors.success)),
             Span::raw(" view  "),
-            Span::styled(
-                "r",
-                Style::default()
-                    .fg(Color::Yellow)
-                    .add_modifier(Modifier::BOLD),
-            ),
+            Span::styled("r", THEME.text.key.fg(THEME.colors.warning)),
             Span::raw(" refresh  "),
-            Span::styled(
-                "q",
-                Style::default()
-                    .fg(Color::LightRed)
-                    .add_modifier(Modifier::BOLD),
-            ),
+            Span::styled("q", THEME.text.key.fg(THEME.colors.danger)),
             Span::raw(" quit"),
         ])
     });
 
     frame.render_widget(
-        Paragraph::new(text)
-            .style(Style::default().fg(Color::Gray))
-            .block(
-                Block::default()
-                    .borders(Borders::TOP)
-                    .border_style(Style::default().fg(Color::DarkGray)),
-            ),
+        Paragraph::new(text).style(THEME.text.body).block(
+            Block::default()
+                .borders(Borders::TOP)
+                .border_style(Style::default().fg(THEME.colors.text_muted)),
+        ),
         area,
     );
 }
@@ -228,12 +193,12 @@ impl Component for StackList {
     }
 
     fn handle_key(&mut self, code: KeyCode, _state: &AppState) -> Vec<Action> {
-        match code {
-            KeyCode::Char('q') | KeyCode::Esc => vec![Action::Quit],
-            KeyCode::Char('r') => vec![Action::RefreshStacks],
-            KeyCode::Down | KeyCode::Char('j') => vec![Action::SelectNext],
-            KeyCode::Up | KeyCode::Char('k') => vec![Action::SelectPrevious],
-            KeyCode::Enter => self
+        match key_intent(code) {
+            Some(KeyIntent::Back) => vec![Action::Quit],
+            Some(KeyIntent::Refresh) => vec![Action::RefreshStacks],
+            Some(KeyIntent::MoveDown) => vec![Action::SelectNext],
+            Some(KeyIntent::MoveUp) => vec![Action::SelectPrevious],
+            Some(KeyIntent::DrillIn) => self
                 .list_state
                 .selected()
                 .map(|index| vec![Action::ShowLayers(index)])

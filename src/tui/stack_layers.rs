@@ -1,20 +1,33 @@
 use crossterm::event::KeyCode;
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Borders, List, ListItem, ListState, Paragraph, Wrap};
 
 use crate::stack::{Layer, LayerDetail, StackSummary};
 use crate::theme::glyphs::{GlyphSet, NERD_FONT};
+use crate::theme::ui::THEME;
 use crate::tui::app::{
     Action, AppState, Component, Screen, layer_detail_cache_key, layer_diff_cache_key,
     lower_layer_ref,
 };
 
+use super::keymap::{KeyIntent, key_intent};
+use super::panel::panel_block;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ActivePanel {
+    Layers,
+    Detail,
+    Files,
+    Diff,
+}
+
 pub struct StackLayers {
     list_state: ListState,
     active_stack_label: Option<String>,
+    active_panel: ActivePanel,
     selected_diff_file: usize,
     diff_scroll: u16,
     active_layer_key: Option<String>,
@@ -25,6 +38,7 @@ impl StackLayers {
         Self {
             list_state: ListState::default(),
             active_stack_label: None,
+            active_panel: ActivePanel::Layers,
             selected_diff_file: 0,
             diff_scroll: 0,
             active_layer_key: None,
@@ -41,6 +55,7 @@ fn render(
     state: &AppState,
     list_state: &mut ListState,
     index: usize,
+    active_panel: ActivePanel,
     selected_diff_file: usize,
     diff_scroll: u16,
 ) {
@@ -63,6 +78,7 @@ fn render(
         state,
         stack,
         list_state,
+        active_panel,
         selected_diff_file,
         diff_scroll,
     );
@@ -71,21 +87,16 @@ fn render(
 
 fn render_header(frame: &mut Frame, area: Rect, stack: &StackSummary) {
     let header = Block::default()
-        .title(Span::styled(
-            " stack details ",
-            Style::default()
-                .fg(Color::Cyan)
-                .add_modifier(Modifier::BOLD),
-        ))
+        .title(Span::styled(" stack details ", THEME.text.heading))
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
-        .border_style(Style::default().fg(Color::Blue));
+        .border_style(THEME.tertiary_border());
 
     frame.render_widget(
         Paragraph::new(format!("{} (trunk: {})", stack.label, stack.trunk))
             .style(
                 Style::default()
-                    .fg(Color::LightMagenta)
+                    .fg(THEME.colors.secondary)
                     .add_modifier(Modifier::BOLD),
             )
             .block(header),
@@ -95,17 +106,17 @@ fn render_header(frame: &mut Frame, area: Rect, stack: &StackSummary) {
 
 fn render_footer(frame: &mut Frame, area: Rect) {
     let content = Line::from(vec![
-        Span::styled("j/k", Style::default().add_modifier(Modifier::BOLD)),
+        Span::styled("j/k", THEME.text.key),
         Span::raw(" navigate  "),
-        Span::styled("O", Style::default().add_modifier(Modifier::BOLD)),
+        Span::styled("O", THEME.text.key),
         Span::raw(" open PR  "),
-        Span::styled("r", Style::default().add_modifier(Modifier::BOLD)),
+        Span::styled("r", THEME.text.key),
         Span::raw(" refresh  "),
-        Span::styled("[/]", Style::default().add_modifier(Modifier::BOLD)),
-        Span::raw(" files  "),
-        Span::styled("PgUp/PgDn", Style::default().add_modifier(Modifier::BOLD)),
+        Span::styled("tab/h/l", THEME.text.key),
+        Span::raw(" panels  "),
+        Span::styled("PgUp/PgDn", THEME.text.key),
         Span::raw(" diff  "),
-        Span::styled("esc/q", Style::default().add_modifier(Modifier::BOLD)),
+        Span::styled("esc/q", THEME.text.key),
         Span::raw(" back"),
     ]);
 
@@ -118,6 +129,7 @@ fn render_stack(
     state: &AppState,
     stack: &StackSummary,
     list_state: &mut ListState,
+    active_panel: ActivePanel,
     selected_diff_file: usize,
     diff_scroll: u16,
 ) {
@@ -134,24 +146,8 @@ fn render_stack(
         .collect();
 
     let list = List::new(items)
-        .block(
-            Block::default()
-                .title(Span::styled(
-                    " layers ",
-                    Style::default()
-                        .fg(Color::Cyan)
-                        .add_modifier(Modifier::BOLD),
-                ))
-                .borders(Borders::ALL)
-                .border_type(BorderType::Rounded)
-                .border_style(Style::default().fg(Color::Blue)),
-        )
-        .highlight_style(
-            Style::default()
-                .fg(Color::Black)
-                .bg(Color::LightMagenta)
-                .add_modifier(Modifier::BOLD),
-        )
+        .block(panel_block("layers", active_panel == ActivePanel::Layers))
+        .highlight_style(THEME.text.selected)
         .highlight_symbol(format!("{} ", glyphs().current));
 
     frame.render_stateful_widget(list, list_area, list_state);
@@ -162,6 +158,7 @@ fn render_stack(
         state,
         stack,
         list_state.selected(),
+        active_panel,
         selected_diff_file,
         diff_scroll,
     );
@@ -173,25 +170,15 @@ fn render_layer_detail(
     state: &AppState,
     stack: &StackSummary,
     selected: Option<usize>,
+    active_panel: ActivePanel,
     selected_diff_file: usize,
     diff_scroll: u16,
 ) {
     let Some(selected) = selected else {
         frame.render_widget(
             Paragraph::new("No layer selected")
-                .style(Style::default().fg(Color::DarkGray))
-                .block(
-                    Block::default()
-                        .title(Span::styled(
-                            " details ",
-                            Style::default()
-                                .fg(Color::Magenta)
-                                .add_modifier(Modifier::BOLD),
-                        ))
-                        .borders(Borders::ALL)
-                        .border_type(BorderType::Rounded)
-                        .border_style(Style::default().fg(Color::Magenta)),
-                ),
+                .style(THEME.text.muted)
+                .block(panel_block("details", active_panel == ActivePanel::Detail)),
             area,
         );
         return;
@@ -204,27 +191,20 @@ fn render_layer_detail(
     let rebase_status = if layer.needs_rebase {
         Span::styled(
             "Needs rebase",
-            Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(THEME.colors.danger)
+                .add_modifier(Modifier::BOLD),
         )
     } else {
         Span::styled(
             "Up to date",
             Style::default()
-                .fg(Color::Green)
+                .fg(THEME.colors.success)
                 .add_modifier(Modifier::BOLD),
         )
     };
 
-    let detail_block = Block::default()
-        .title(Span::styled(
-            " details ",
-            Style::default()
-                .fg(Color::Magenta)
-                .add_modifier(Modifier::BOLD),
-        ))
-        .borders(Borders::ALL)
-        .border_type(BorderType::Rounded)
-        .border_style(Style::default().fg(Color::Magenta));
+    let detail_block = panel_block("details", active_panel == ActivePanel::Detail);
 
     let detail = state
         .layer_details
@@ -248,7 +228,14 @@ fn render_layer_detail(
     let diff_key = layer_diff_cache_key(stack, layer);
     let diff = state.layer_diffs.get(&diff_key).map(String::as_str);
     let diff_loading = state.layer_diffs.is_loading(&diff_key);
-    render_diff_files(frame, files_area, diff, diff_loading, selected_diff_file);
+    render_diff_files(
+        frame,
+        files_area,
+        diff,
+        diff_loading,
+        active_panel == ActivePanel::Files,
+        selected_diff_file,
+    );
     render_diff(
         frame,
         diff_area,
@@ -256,6 +243,7 @@ fn render_layer_detail(
         selected,
         diff,
         diff_loading,
+        active_panel == ActivePanel::Diff,
         selected_diff_file,
         diff_scroll,
     );
@@ -295,18 +283,10 @@ fn render_diff_files(
     area: Rect,
     diff: Option<&str>,
     is_loading: bool,
+    is_active: bool,
     selected_diff_file: usize,
 ) {
-    let block = Block::default()
-        .title(Span::styled(
-            " files ",
-            Style::default()
-                .fg(Color::Cyan)
-                .add_modifier(Modifier::BOLD),
-        ))
-        .borders(Borders::ALL)
-        .border_type(BorderType::Rounded)
-        .border_style(Style::default().fg(Color::Blue));
+    let block = panel_block("files", is_active);
 
     let Some(diff) = diff else {
         let message = if is_loading {
@@ -315,9 +295,7 @@ fn render_diff_files(
             "Diff not loaded."
         };
         frame.render_widget(
-            Paragraph::new(message)
-                .style(Style::default().fg(Color::DarkGray))
-                .block(block),
+            Paragraph::new(message).style(THEME.text.muted).block(block),
             area,
         );
         return;
@@ -327,7 +305,7 @@ fn render_diff_files(
     if files.is_empty() {
         frame.render_widget(
             Paragraph::new("No changes in this layer.")
-                .style(Style::default().fg(Color::DarkGray))
+                .style(THEME.text.muted)
                 .block(block),
             area,
         );
@@ -382,6 +360,7 @@ fn render_diff(
     selected_layer: usize,
     diff: Option<&str>,
     is_loading: bool,
+    is_active: bool,
     selected_diff_file: usize,
     diff_scroll: u16,
 ) {
@@ -393,16 +372,7 @@ fn render_diff(
         lower_layer_ref(stack, selected_layer),
         layer.branch
     );
-    let block = Block::default()
-        .title(Span::styled(
-            title,
-            Style::default()
-                .fg(Color::Green)
-                .add_modifier(Modifier::BOLD),
-        ))
-        .borders(Borders::ALL)
-        .border_type(BorderType::Rounded)
-        .border_style(Style::default().fg(Color::Green));
+    let block = panel_block(title, is_active);
 
     let Some(diff) = diff else {
         let message = if is_loading {
@@ -411,9 +381,7 @@ fn render_diff(
             "Diff unavailable."
         };
         frame.render_widget(
-            Paragraph::new(message)
-                .style(Style::default().fg(Color::DarkGray))
-                .block(block),
+            Paragraph::new(message).style(THEME.text.muted).block(block),
             area,
         );
         return;
@@ -440,18 +408,18 @@ fn render_diff(
 
 fn diff_line(text: &str) -> Line<'static> {
     let style = if text.starts_with("+++") || text.starts_with("---") {
-        Style::default().fg(Color::DarkGray)
+        Style::default().fg(THEME.colors.text_muted)
     } else if text.starts_with('+') {
-        Style::default().fg(Color::Green)
+        Style::default().fg(THEME.colors.success)
     } else if text.starts_with('-') {
-        Style::default().fg(Color::Red)
+        Style::default().fg(THEME.colors.danger)
     } else if text.starts_with("@@") {
         Style::default()
-            .fg(Color::Cyan)
+            .fg(THEME.colors.primary)
             .add_modifier(Modifier::BOLD)
     } else if text.starts_with("diff --git") {
         Style::default()
-            .fg(Color::Magenta)
+            .fg(THEME.colors.secondary)
             .add_modifier(Modifier::BOLD)
     } else {
         Style::default()
@@ -488,7 +456,7 @@ fn detail_lines(
             Span::styled(
                 pr.url.clone(),
                 Style::default()
-                    .fg(Color::Blue)
+                    .fg(THEME.colors.link)
                     .add_modifier(Modifier::UNDERLINED),
             ),
         ]));
@@ -499,7 +467,7 @@ fn detail_lines(
             lines.push(Line::from(""));
             lines.push(Line::from(Span::styled(
                 "Detail not loaded yet.",
-                Style::default().fg(Color::DarkGray),
+                THEME.text.muted,
             )));
         }
         return lines;
@@ -534,7 +502,7 @@ fn detail_lines(
     lines.push(Line::from(Span::styled(
         "Commits",
         Style::default()
-            .fg(Color::DarkGray)
+            .fg(THEME.colors.text_muted)
             .add_modifier(Modifier::BOLD),
     )));
 
@@ -559,12 +527,7 @@ fn labeled_line(label: &str, value: String) -> Line<'static> {
 }
 
 fn label_span(label: &str) -> Span<'static> {
-    Span::styled(
-        format!("{label:<10}"),
-        Style::default()
-            .fg(Color::DarkGray)
-            .add_modifier(Modifier::BOLD),
-    )
+    Span::styled(format!("{label:<10}"), THEME.text.label)
 }
 
 fn list_or_dash(values: &[String]) -> String {
@@ -601,7 +564,7 @@ fn row(layer: &Layer) -> Line<'static> {
     let mut style = Style::default();
 
     if layer.is_current {
-        style = style.fg(Color::LightGreen).add_modifier(Modifier::BOLD);
+        style = style.fg(THEME.colors.success).add_modifier(Modifier::BOLD);
     }
 
     let status = match &layer.pull_request {
@@ -639,6 +602,7 @@ impl Component for StackLayers {
                 state,
                 &mut self.list_state,
                 index,
+                self.active_panel,
                 self.selected_diff_file,
                 self.diff_scroll,
             );
@@ -650,15 +614,25 @@ impl Component for StackLayers {
             return Vec::new();
         };
 
-        match code {
-            KeyCode::Char('q') | KeyCode::Esc => vec![Action::ShowList],
-            KeyCode::Down | KeyCode::Char('j') => vec![Action::SelectNext],
-            KeyCode::Up | KeyCode::Char('k') => vec![Action::SelectPrevious],
-            KeyCode::Char(']') => vec![Action::SelectNextDiffFile],
-            KeyCode::Char('[') => vec![Action::SelectPreviousDiffFile],
-            KeyCode::PageDown | KeyCode::Char(' ') => vec![Action::ScrollDiffDown],
-            KeyCode::PageUp | KeyCode::Backspace => vec![Action::ScrollDiffUp],
-            KeyCode::Char('r') => self
+        match key_intent(code) {
+            Some(KeyIntent::Back) => vec![Action::ShowList],
+            Some(KeyIntent::FocusNext) => vec![Action::FocusNextPanel],
+            Some(KeyIntent::FocusPrevious) => vec![Action::FocusPreviousPanel],
+            Some(KeyIntent::MoveDown) => match self.active_panel {
+                ActivePanel::Layers => vec![Action::SelectNext],
+                ActivePanel::Files => vec![Action::SelectNextDiffFile],
+                ActivePanel::Diff => vec![Action::ScrollDiffLineDown],
+                ActivePanel::Detail => Vec::new(),
+            },
+            Some(KeyIntent::MoveUp) => match self.active_panel {
+                ActivePanel::Layers => vec![Action::SelectPrevious],
+                ActivePanel::Files => vec![Action::SelectPreviousDiffFile],
+                ActivePanel::Diff => vec![Action::ScrollDiffLineUp],
+                ActivePanel::Detail => Vec::new(),
+            },
+            Some(KeyIntent::PageDown) => vec![Action::ScrollDiffDown],
+            Some(KeyIntent::PageUp) => vec![Action::ScrollDiffUp],
+            Some(KeyIntent::Refresh) => self
                 .list_state
                 .selected()
                 .map(|layer_index| {
@@ -676,7 +650,7 @@ impl Component for StackLayers {
                     ]
                 })
                 .unwrap_or_default(),
-            KeyCode::Char('O') => self
+            Some(KeyIntent::DrillIn) | Some(KeyIntent::OpenExternal) => self
                 .list_state
                 .selected()
                 .map(|layer_index| {
@@ -714,6 +688,12 @@ impl Component for StackLayers {
                 select_previous(&mut self.list_state, active_layer_count(state));
                 self.reset_diff_view_for_selection(state);
             }
+            Action::FocusNextPanel => {
+                self.active_panel = next_panel(self.active_panel);
+            }
+            Action::FocusPreviousPanel => {
+                self.active_panel = previous_panel(self.active_panel);
+            }
             Action::SelectNextDiffFile => {
                 self.select_next_diff_file(state);
             }
@@ -725,6 +705,12 @@ impl Component for StackLayers {
             }
             Action::ScrollDiffUp => {
                 self.scroll_diff_up();
+            }
+            Action::ScrollDiffLineDown => {
+                self.scroll_diff_line_down();
+            }
+            Action::ScrollDiffLineUp => {
+                self.scroll_diff_line_up();
             }
             Action::StacksLoaded(_) => {
                 let active_stack = if let Screen::Layers(stack_index) = state.screen {
@@ -787,6 +773,32 @@ impl StackLayers {
 
     fn scroll_diff_up(&mut self) {
         self.diff_scroll = self.diff_scroll.saturating_sub(12);
+    }
+
+    fn scroll_diff_line_down(&mut self) {
+        self.diff_scroll = self.diff_scroll.saturating_add(1);
+    }
+
+    fn scroll_diff_line_up(&mut self) {
+        self.diff_scroll = self.diff_scroll.saturating_sub(1);
+    }
+}
+
+fn next_panel(panel: ActivePanel) -> ActivePanel {
+    match panel {
+        ActivePanel::Layers => ActivePanel::Detail,
+        ActivePanel::Detail => ActivePanel::Files,
+        ActivePanel::Files => ActivePanel::Diff,
+        ActivePanel::Diff => ActivePanel::Layers,
+    }
+}
+
+fn previous_panel(panel: ActivePanel) -> ActivePanel {
+    match panel {
+        ActivePanel::Layers => ActivePanel::Diff,
+        ActivePanel::Detail => ActivePanel::Layers,
+        ActivePanel::Files => ActivePanel::Detail,
+        ActivePanel::Diff => ActivePanel::Files,
     }
 }
 
@@ -875,19 +887,22 @@ fn select_previous(state: &mut ListState, count: usize) {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
+
     use super::*;
     use crate::stack::{
         CheckSummary, LayerCommit, LayerDetail, PullRequestDetail, PullRequestRef, ReviewerState,
     };
     use crate::test_fixtures::stack_summary;
+    use crate::tui::layer_resource::LayerResourceCache;
 
     fn app_state(stacks: Vec<StackSummary>, screen: Screen) -> AppState {
         AppState {
             stacks,
             screen,
             status: None,
-            layer_details: Default::default(),
-            layer_diffs: Default::default(),
+            layer_details: LayerResourceCache::default(),
+            layer_diffs: LayerResourceCache::default(),
             should_quit: false,
         }
     }
@@ -993,6 +1008,38 @@ mod tests {
                 layer_index: 1
             }]
         ));
+    }
+
+    #[test]
+    fn tab_focus_changes_what_list_movement_controls() {
+        let mut component = StackLayers::new();
+        let mut state = app_state(vec![stack_summary("a", 1)], Screen::Layers(0));
+        component.update(&Action::ShowLayers(0), &mut state);
+
+        let key = layer_diff_cache_key(&state.stacks[0], &state.stacks[0].layers[0]);
+        state.layer_diffs.store_result(
+            key,
+            Ok([
+                "diff --git a/src/a.rs b/src/a.rs",
+                "+a",
+                "diff --git a/src/b.rs b/src/b.rs",
+                "+b",
+            ]
+            .join("\n")),
+        );
+
+        component.update(&Action::FocusNextPanel, &mut state);
+        component.update(&Action::FocusNextPanel, &mut state);
+        let file_next = component.handle_key(KeyCode::Char('j'), &state);
+        assert!(matches!(file_next.as_slice(), [Action::SelectNextDiffFile]));
+        component.update(&file_next[0], &mut state);
+        assert_eq!(component.selected_diff_file, 1);
+
+        component.update(&Action::FocusNextPanel, &mut state);
+        let diff_down = component.handle_key(KeyCode::Down, &state);
+        assert!(matches!(diff_down.as_slice(), [Action::ScrollDiffLineDown]));
+        component.update(&diff_down[0], &mut state);
+        assert_eq!(component.diff_scroll, 1);
     }
 
     #[test]

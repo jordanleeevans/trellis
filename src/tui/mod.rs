@@ -3,7 +3,9 @@
 //! into a per-stack layer view.
 
 mod app;
+mod keymap;
 mod layer_resource;
+mod panel;
 mod stack_layers;
 mod stack_list;
 

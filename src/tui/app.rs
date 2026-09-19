@@ -29,8 +29,12 @@ pub enum Action {
     RefreshStacks,
     SelectNext,
     SelectPrevious,
+    FocusNextPanel,
+    FocusPreviousPanel,
     SelectNextDiffFile,
     SelectPreviousDiffFile,
+    ScrollDiffLineDown,
+    ScrollDiffLineUp,
     ScrollDiffDown,
     ScrollDiffUp,
     ShowLayers(usize),
@@ -464,8 +468,12 @@ impl App {
             }
             Action::SelectNext
             | Action::SelectPrevious
+            | Action::FocusNextPanel
+            | Action::FocusPreviousPanel
             | Action::SelectNextDiffFile
             | Action::SelectPreviousDiffFile
+            | Action::ScrollDiffLineDown
+            | Action::ScrollDiffLineUp
             | Action::ScrollDiffDown
             | Action::ScrollDiffUp => Vec::new(),
         }
