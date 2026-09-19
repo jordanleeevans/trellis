@@ -18,6 +18,7 @@ use super::panel::panel_block;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ActivePanel {
+    Stacks,
     Layers,
     Detail,
     Files,
@@ -25,6 +26,7 @@ enum ActivePanel {
 }
 
 pub struct StackLayers {
+    stack_list_state: ListState,
     list_state: ListState,
     active_stack_label: Option<String>,
     active_panel: ActivePanel,
@@ -36,9 +38,10 @@ pub struct StackLayers {
 impl StackLayers {
     pub fn new() -> Self {
         Self {
+            stack_list_state: ListState::default(),
             list_state: ListState::default(),
             active_stack_label: None,
-            active_panel: ActivePanel::Layers,
+            active_panel: ActivePanel::Stacks,
             selected_diff_file: 0,
             diff_scroll: 0,
             active_layer_key: None,
@@ -53,8 +56,8 @@ impl StackLayers {
 fn render(
     frame: &mut Frame,
     state: &AppState,
+    stack_list_state: &mut ListState,
     list_state: &mut ListState,
-    index: usize,
     active_panel: ActivePanel,
     selected_diff_file: usize,
     diff_scroll: u16,
@@ -66,18 +69,15 @@ fn render(
     ])
     .areas(frame.area());
 
-    let Some(stack) = state.stacks.get(index) else {
-        frame.render_widget(Paragraph::new("Stack no longer available."), content_area);
-        return;
-    };
-
-    render_header(frame, header_area, stack);
+    let selected_stack = selected_stack_index(state, stack_list_state.selected());
+    render_header(frame, header_area, state, selected_stack);
     render_stack(
         frame,
         content_area,
         state,
-        stack,
+        stack_list_state,
         list_state,
+        selected_stack,
         active_panel,
         selected_diff_file,
         diff_scroll,
@@ -85,15 +85,33 @@ fn render(
     render_footer(frame, footer_area, state);
 }
 
-fn render_header(frame: &mut Frame, area: Rect, stack: &StackSummary) {
+fn render_header(
+    frame: &mut Frame,
+    area: Rect,
+    state: &AppState,
+    selected_stack: Option<usize>,
+) {
     let header = Block::default()
-        .title(Span::styled(" stack details ", THEME.text.heading))
+        .title(Line::from(vec![
+            Span::styled(
+                " Trellis ",
+                Style::default()
+                    .fg(THEME.colors.text_inverse)
+                    .bg(THEME.colors.primary),
+            ),
+            Span::styled(" stacks", THEME.text.heading.fg(THEME.colors.secondary)),
+        ]))
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
-        .border_style(THEME.tertiary_border());
+        .border_style(THEME.primary_border());
+
+    let content = selected_stack
+        .and_then(|index| state.stacks.get(index))
+        .map(|stack| format!("{} (trunk: {})", stack.label, stack.trunk))
+        .unwrap_or_else(|| "Browse locally tracked stacks and layer status".to_string());
 
     frame.render_widget(
-        Paragraph::new(format!("{} (trunk: {})", stack.label, stack.trunk))
+        Paragraph::new(content)
             .style(
                 Style::default()
                     .fg(THEME.colors.secondary)
@@ -107,7 +125,14 @@ fn render_header(frame: &mut Frame, area: Rect, stack: &StackSummary) {
 fn render_footer(frame: &mut Frame, area: Rect, state: &AppState) {
     let content = footer_line(state);
 
-    frame.render_widget(Paragraph::new(content), area);
+    frame.render_widget(
+        Paragraph::new(content).block(
+            Block::default()
+                .borders(Borders::TOP)
+                .border_style(Style::default().fg(THEME.colors.text_muted)),
+        ),
+        area,
+    );
 }
 
 fn footer_line(state: &AppState) -> Line<'static> {
@@ -131,6 +156,8 @@ fn footer_line(state: &AppState) -> Line<'static> {
         Line::from(vec![
             Span::styled("j/k", THEME.text.key),
             Span::raw(" navigate  "),
+            Span::styled("enter", THEME.text.key.fg(THEME.colors.success)),
+            Span::raw(" next panel  "),
             Span::styled("O", THEME.text.key),
             Span::raw(" open PR  "),
             Span::styled("r", THEME.text.key),
@@ -139,8 +166,8 @@ fn footer_line(state: &AppState) -> Line<'static> {
             Span::raw(" panels  "),
             Span::styled("PgUp/PgDn", THEME.text.key),
             Span::raw(" diff  "),
-            Span::styled("esc/q", THEME.text.key),
-            Span::raw(" back"),
+            Span::styled("q", THEME.text.key.fg(THEME.colors.danger)),
+            Span::raw(" quit"),
         ])
     }
 }
@@ -149,17 +176,40 @@ fn render_stack(
     frame: &mut Frame,
     area: Rect,
     state: &AppState,
-    stack: &StackSummary,
+    stack_list_state: &mut ListState,
     list_state: &mut ListState,
+    selected_stack: Option<usize>,
     active_panel: ActivePanel,
     selected_diff_file: usize,
     diff_scroll: u16,
 ) {
-    let [list_area, detail_area] = Layout::new(
+    let [stack_area, list_area, detail_area] = Layout::new(
         Direction::Horizontal,
-        [Constraint::Percentage(50), Constraint::Percentage(50)],
+        [
+            Constraint::Percentage(25),
+            Constraint::Percentage(25),
+            Constraint::Percentage(50),
+        ],
     )
     .areas(area);
+
+    render_stacks(frame, stack_area, state, stack_list_state, active_panel);
+
+    let Some(stack) = selected_stack.and_then(|index| state.stacks.get(index)) else {
+        frame.render_widget(
+            Paragraph::new("No stacks found in this repository.")
+                .style(THEME.text.muted)
+                .block(panel_block("layers", active_panel == ActivePanel::Layers)),
+            list_area,
+        );
+        frame.render_widget(
+            Paragraph::new("Select a stack to view its layers.")
+                .style(THEME.text.muted)
+                .block(panel_block("details", active_panel == ActivePanel::Detail)),
+            detail_area,
+        );
+        return;
+    };
 
     let items: Vec<ListItem> = stack
         .layers
@@ -184,6 +234,37 @@ fn render_stack(
         selected_diff_file,
         diff_scroll,
     );
+}
+
+fn render_stacks(
+    frame: &mut Frame,
+    area: Rect,
+    state: &AppState,
+    list_state: &mut ListState,
+    active_panel: ActivePanel,
+) {
+    if state.stacks.is_empty() {
+        frame.render_widget(
+            Paragraph::new("No stacks found in this repository.")
+                .style(THEME.text.muted)
+                .block(panel_block("stacks", active_panel == ActivePanel::Stacks)),
+            area,
+        );
+        return;
+    }
+
+    let items: Vec<ListItem> = state
+        .stacks
+        .iter()
+        .map(|stack| ListItem::new(stack_row(stack)))
+        .collect();
+
+    let list = List::new(items)
+        .block(panel_block("stacks", active_panel == ActivePanel::Stacks))
+        .highlight_style(THEME.text.selected)
+        .highlight_symbol(format!("{} ", glyphs().current));
+
+    frame.render_stateful_widget(list, area, list_state);
 }
 
 fn render_layer_detail(
@@ -618,35 +699,33 @@ fn row(layer: &Layer) -> Line<'static> {
 
 impl Component for StackLayers {
     fn draw(&mut self, frame: &mut Frame, state: &AppState) {
-        if let Screen::Layers(index) = state.screen {
-            render(
-                frame,
-                state,
-                &mut self.list_state,
-                index,
-                self.active_panel,
-                self.selected_diff_file,
-                self.diff_scroll,
-            );
-        }
+        render(
+            frame,
+            state,
+            &mut self.stack_list_state,
+            &mut self.list_state,
+            self.active_panel,
+            self.selected_diff_file,
+            self.diff_scroll,
+        );
     }
 
     fn handle_key(&mut self, code: KeyCode, state: &AppState) -> Vec<Action> {
-        let Screen::Layers(stack_index) = state.screen else {
-            return Vec::new();
-        };
+        let selected_stack = selected_stack_index(state, self.stack_list_state.selected());
 
         match key_intent(code) {
-            Some(KeyIntent::Back) => vec![Action::ShowList],
+            Some(KeyIntent::Back) => vec![Action::Quit],
             Some(KeyIntent::FocusNext) => vec![Action::FocusNextPanel],
             Some(KeyIntent::FocusPrevious) => vec![Action::FocusPreviousPanel],
             Some(KeyIntent::MoveDown) => match self.active_panel {
+                ActivePanel::Stacks => next_stack_action(state, selected_stack),
                 ActivePanel::Layers => vec![Action::SelectNext],
                 ActivePanel::Files => vec![Action::SelectNextDiffFile],
                 ActivePanel::Diff => vec![Action::ScrollDiffLineDown],
                 ActivePanel::Detail => Vec::new(),
             },
             Some(KeyIntent::MoveUp) => match self.active_panel {
+                ActivePanel::Stacks => previous_stack_action(state, selected_stack),
                 ActivePanel::Layers => vec![Action::SelectPrevious],
                 ActivePanel::Files => vec![Action::SelectPreviousDiffFile],
                 ActivePanel::Diff => vec![Action::ScrollDiffLineUp],
@@ -654,28 +733,38 @@ impl Component for StackLayers {
             },
             Some(KeyIntent::PageDown) => vec![Action::ScrollDiffDown],
             Some(KeyIntent::PageUp) => vec![Action::ScrollDiffUp],
-            Some(KeyIntent::Refresh) => self
-                .list_state
-                .selected()
-                .map(|layer_index| {
-                    vec![
-                        Action::LoadLayerDetail {
-                            stack_index,
-                            layer_index,
-                            force: true,
-                        },
-                        Action::LoadLayerDiff {
-                            stack_index,
-                            layer_index,
-                            force: true,
-                        },
-                    ]
-                })
-                .unwrap_or_default(),
+            Some(KeyIntent::Refresh) => {
+                if self.active_panel == ActivePanel::Stacks || selected_stack.is_none() {
+                    vec![Action::RefreshStacks]
+                } else {
+                    self.list_state
+                        .selected()
+                        .map(|layer_index| {
+                            let stack_index = selected_stack.unwrap_or_default();
+                            vec![
+                                Action::LoadLayerDetail {
+                                    stack_index,
+                                    layer_index,
+                                    force: true,
+                                },
+                                Action::LoadLayerDiff {
+                                    stack_index,
+                                    layer_index,
+                                    force: true,
+                                },
+                            ]
+                        })
+                        .unwrap_or_default()
+                }
+            }
+            Some(KeyIntent::DrillIn) if self.active_panel == ActivePanel::Stacks => {
+                vec![Action::FocusNextPanel]
+            }
             Some(KeyIntent::DrillIn) | Some(KeyIntent::OpenExternal) => self
                 .list_state
                 .selected()
                 .map(|layer_index| {
+                    let stack_index = selected_stack.unwrap_or_default();
                     vec![Action::OpenPullRequest {
                         stack_index,
                         layer_index,
@@ -689,6 +778,7 @@ impl Component for StackLayers {
     fn update(&mut self, action: &Action, state: &mut AppState) {
         match action {
             Action::ShowLayers(stack_index) => {
+                self.stack_list_state.select(Some(*stack_index));
                 let Some(stack) = state.stacks.get(*stack_index) else {
                     return;
                 };
@@ -735,11 +825,9 @@ impl Component for StackLayers {
                 self.scroll_diff_line_up();
             }
             Action::StacksLoaded(_) => {
-                let active_stack = if let Screen::Layers(stack_index) = state.screen {
-                    state.stacks.get(stack_index)
-                } else {
-                    None
-                };
+                let selected_stack = selected_stack_index(state, self.stack_list_state.selected());
+                self.stack_list_state.select(selected_stack);
+                let active_stack = selected_stack.and_then(|stack_index| state.stacks.get(stack_index));
                 let layer_count = active_stack.map(|stack| stack.layers.len()).unwrap_or(0);
                 let active_label = active_stack.map(|stack| stack.label.clone());
                 let preserve_selection =
@@ -808,16 +896,18 @@ impl StackLayers {
 
 fn next_panel(panel: ActivePanel) -> ActivePanel {
     match panel {
+        ActivePanel::Stacks => ActivePanel::Layers,
         ActivePanel::Layers => ActivePanel::Detail,
         ActivePanel::Detail => ActivePanel::Files,
         ActivePanel::Files => ActivePanel::Diff,
-        ActivePanel::Diff => ActivePanel::Layers,
+        ActivePanel::Diff => ActivePanel::Stacks,
     }
 }
 
 fn previous_panel(panel: ActivePanel) -> ActivePanel {
     match panel {
-        ActivePanel::Layers => ActivePanel::Diff,
+        ActivePanel::Stacks => ActivePanel::Diff,
+        ActivePanel::Layers => ActivePanel::Stacks,
         ActivePanel::Detail => ActivePanel::Layers,
         ActivePanel::Files => ActivePanel::Detail,
         ActivePanel::Diff => ActivePanel::Files,
@@ -825,16 +915,14 @@ fn previous_panel(panel: ActivePanel) -> ActivePanel {
 }
 
 fn active_layer_key(state: &AppState, selected: Option<usize>) -> Option<String> {
-    let Screen::Layers(stack_index) = state.screen else {
-        return None;
-    };
+    let stack_index = selected_stack_index(state, None)?;
     let stack = state.stacks.get(stack_index)?;
     let layer = stack.layers.get(selected?)?;
     Some(layer_diff_cache_key(stack, layer))
 }
 
 fn active_diff_file_count(state: &AppState, selected: Option<usize>) -> usize {
-    let Screen::Layers(stack_index) = state.screen else {
+    let Some(stack_index) = selected_stack_index(state, None) else {
         return 0;
     };
     let Some(stack) = state.stacks.get(stack_index) else {
@@ -851,15 +939,10 @@ fn active_diff_file_count(state: &AppState, selected: Option<usize>) -> usize {
 }
 
 fn active_layer_count(state: &AppState) -> usize {
-    if let Screen::Layers(stack_index) = state.screen {
-        state
-            .stacks
-            .get(stack_index)
-            .map(|stack| stack.layers.len())
-            .unwrap_or(0)
-    } else {
-        0
-    }
+    selected_stack_index(state, None)
+        .and_then(|stack_index| state.stacks.get(stack_index))
+        .map(|stack| stack.layers.len())
+        .unwrap_or(0)
 }
 
 fn clamped_selection(
@@ -877,6 +960,64 @@ fn clamped_selection(
     } else {
         Some(0)
     }
+}
+
+fn selected_stack_index(state: &AppState, fallback: Option<usize>) -> Option<usize> {
+    match state.screen {
+        Screen::Layers(index) if index < state.stacks.len() => Some(index),
+        _ => fallback
+            .filter(|index| *index < state.stacks.len())
+            .or_else(|| state.stacks.iter().position(|stack| stack.is_current))
+            .or(if state.stacks.is_empty() { None } else { Some(0) }),
+    }
+}
+
+fn next_stack_action(state: &AppState, selected: Option<usize>) -> Vec<Action> {
+    if state.stacks.is_empty() {
+        return Vec::new();
+    }
+
+    let next = match selected {
+        Some(index) if index + 1 < state.stacks.len() => index + 1,
+        _ => 0,
+    };
+
+    vec![Action::ShowLayers(next)]
+}
+
+fn previous_stack_action(state: &AppState, selected: Option<usize>) -> Vec<Action> {
+    if state.stacks.is_empty() {
+        return Vec::new();
+    }
+
+    let previous = match selected {
+        Some(0) | None => state.stacks.len() - 1,
+        Some(index) => index - 1,
+    };
+
+    vec![Action::ShowLayers(previous)]
+}
+
+fn stack_row(stack: &StackSummary) -> Line<'static> {
+    let marker = if stack.is_current {
+        format!("{} ", glyphs().current)
+    } else {
+        "  ".to_string()
+    };
+
+    let mut style = Style::default();
+    if stack.is_current {
+        style = style.fg(THEME.colors.success).add_modifier(Modifier::BOLD);
+    }
+
+    let text = format!(
+        "{marker}{label}  ({layers} layer{plural})",
+        label = stack.label,
+        layers = stack.layer_count(),
+        plural = if stack.layer_count() == 1 { "" } else { "s" },
+    );
+
+    Line::from(Span::styled(text, style))
 }
 
 fn select_next(state: &mut ListState, count: usize) {
@@ -959,6 +1100,7 @@ mod tests {
         component.update(&Action::SelectNext, &mut state);
         component.update(&Action::ShowLayers(1), &mut state);
 
+        assert_eq!(component.stack_list_state.selected(), Some(1));
         assert_eq!(component.list_state.selected(), Some(0));
     }
 
@@ -995,13 +1137,14 @@ mod tests {
         let mut component = StackLayers::new();
         let mut state = app_state(vec![stack_summary("a", 3)], Screen::Layers(0));
         component.update(&Action::ShowLayers(0), &mut state);
+        component.update(&Action::FocusNextPanel, &mut state);
 
         let quit = component.handle_key(KeyCode::Char('q'), &state);
         let next = component.handle_key(KeyCode::Down, &state);
         let previous = component.handle_key(KeyCode::Up, &state);
         let refresh = component.handle_key(KeyCode::Char('r'), &state);
 
-        assert!(matches!(quit.as_slice(), [Action::ShowList]));
+        assert!(matches!(quit.as_slice(), [Action::Quit]));
         assert!(matches!(next.as_slice(), [Action::SelectNext]));
         assert!(matches!(previous.as_slice(), [Action::SelectPrevious]));
         assert!(matches!(
@@ -1027,6 +1170,7 @@ mod tests {
         let mut state = app_state(vec![stack_summary("a", 3)], Screen::Layers(0));
         component.update(&Action::ShowLayers(0), &mut state);
         component.update(&Action::SelectNext, &mut state);
+        component.update(&Action::FocusNextPanel, &mut state);
 
         let actions = component.handle_key(KeyCode::Char('O'), &state);
         assert!(matches!(
@@ -1058,6 +1202,7 @@ mod tests {
 
         component.update(&Action::FocusNextPanel, &mut state);
         component.update(&Action::FocusNextPanel, &mut state);
+        component.update(&Action::FocusNextPanel, &mut state);
         let file_next = component.handle_key(KeyCode::Char('j'), &state);
         assert!(matches!(file_next.as_slice(), [Action::SelectNextDiffFile]));
         component.update(&file_next[0], &mut state);
@@ -1068,6 +1213,26 @@ mod tests {
         assert!(matches!(diff_down.as_slice(), [Action::ScrollDiffLineDown]));
         component.update(&diff_down[0], &mut state);
         assert_eq!(component.diff_scroll, 1);
+    }
+
+    #[test]
+    fn stack_panel_navigation_switches_selected_stack() {
+        let mut component = StackLayers::new();
+        let mut state = app_state(
+            vec![stack_summary("a", 1), stack_summary("b", 1)],
+            Screen::Layers(0),
+        );
+        component.update(&Action::ShowLayers(0), &mut state);
+
+        let next = component.handle_key(KeyCode::Down, &state);
+        assert!(matches!(next.as_slice(), [Action::ShowLayers(1)]));
+
+        state.screen = Screen::Layers(1);
+        component.update(&next[0], &mut state);
+        assert_eq!(component.stack_list_state.selected(), Some(1));
+
+        let refresh = component.handle_key(KeyCode::Char('r'), &state);
+        assert!(matches!(refresh.as_slice(), [Action::RefreshStacks]));
     }
 
     #[test]

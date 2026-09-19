@@ -1,6 +1,5 @@
-//! The interactive terminal UI: an entry-point panel listing every locally
-//! tracked stack (like LazyGit's branch panel, but for stacks), drilling
-//! into a per-stack layer view.
+//! The interactive terminal UI: a unified stack browser that keeps the stack
+//! list, layers, and layer details visible together, similar to LazyGit.
 
 mod app;
 mod keymap;

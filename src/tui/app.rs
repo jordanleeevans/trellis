@@ -14,14 +14,13 @@ use crate::stack::{Layer, LayerDetail, StackSummary, list_stacks};
 use super::keymap::{KeyIntent, key_intent};
 use super::layer_resource::LayerResourceCache;
 use super::stack_layers;
-use super::stack_list;
 
-/// Which screen is currently shown.
+/// Which stack is currently selected in the unified browser.
 #[derive(Debug, Clone, Copy)]
 pub enum Screen {
-    /// The entry-point panel: every locally tracked stack.
+    /// No stack is currently selected.
     List,
-    /// The layer view for the stack at this index into [`AppState::stacks`].
+    /// The unified browser focused on the stack at this index into [`AppState::stacks`].
     Layers(usize),
 }
 
@@ -101,7 +100,6 @@ pub struct AppState {
 
 struct App {
     state: AppState,
-    stack_list: stack_list::StackList,
     stack_layers: stack_layers::StackLayers,
 }
 
@@ -128,7 +126,6 @@ impl App {
     fn new() -> Self {
         Self {
             state: AppState::new(),
-            stack_list: stack_list::StackList::new(),
             stack_layers: stack_layers::StackLayers::new(),
         }
     }
@@ -140,11 +137,7 @@ impl App {
                 .stacks
                 .get(index)
                 .map(|stack| stack.label.clone()),
-            Screen::List => self
-                .stack_list
-                .selected_index()
-                .and_then(|index| self.state.stacks.get(index))
-                .map(|stack| stack.label.clone()),
+            Screen::List => None,
         }
     }
 
@@ -159,17 +152,11 @@ impl App {
         self.state.last_successful_stacks = self.state.stacks.clone();
         let mut actions = vec![Action::StacksLoaded(selected_index)];
 
-        if matches!(self.state.screen, Screen::Layers(_)) {
-            if let Some(index) = selected_index {
-                self.state.screen = Screen::Layers(index);
-                actions.push(Action::ClearStatus);
-            } else {
-                self.state.screen = Screen::List;
-                actions.push(Action::SetStatus(
-                    "selected stack is no longer available".to_string(),
-                ));
-            }
+        if let Some(index) = selected_index {
+            self.state.screen = Screen::Layers(index);
+            actions.push(Action::ClearStatus);
         } else {
+            self.state.screen = Screen::List;
             actions.push(Action::ClearStatus);
         }
 
@@ -177,17 +164,11 @@ impl App {
     }
 
     fn draw(&mut self, frame: &mut Frame) {
-        match self.state.screen {
-            Screen::List => self.stack_list.draw(frame, &self.state),
-            Screen::Layers(_) => self.stack_layers.draw(frame, &self.state),
-        }
+        self.stack_layers.draw(frame, &self.state);
     }
 
     fn handle_key(&mut self, code: KeyCode) -> Vec<Action> {
-        let mut actions = match self.state.screen {
-            Screen::List => self.stack_list.handle_key(code, &self.state),
-            Screen::Layers(_) => self.stack_layers.handle_key(code, &self.state),
-        };
+        let mut actions = self.stack_layers.handle_key(code, &self.state);
 
         if self.state.error.is_some() && key_intent(code) == Some(KeyIntent::DismissMessage) {
             actions.push(Action::ClearError);
@@ -215,7 +196,6 @@ impl App {
             } else {
                 self.apply_action(&action, shell, repo).await
             };
-            self.stack_list.update(&action, &mut self.state);
             self.stack_layers.update(&action, &mut self.state);
             pending.extend(follow_ups);
 
@@ -395,10 +375,7 @@ impl App {
                     Vec::new()
                 }
             }
-            Action::ShowList => {
-                self.state.screen = Screen::List;
-                Vec::new()
-            }
+            Action::ShowList => Vec::new(),
             Action::OpenPullRequest {
                 stack_index,
                 layer_index,
@@ -531,7 +508,6 @@ impl App {
                     && index >= self.state.stacks.len()
                 {
                     self.state.screen = Screen::List;
-                    self.state.status = Some("selected stack is no longer available".to_string());
                 }
                 Vec::new()
             }
