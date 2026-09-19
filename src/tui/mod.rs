@@ -3,6 +3,7 @@
 //! into a per-stack layer view.
 
 mod app;
+mod layer_resource;
 mod stack_layers;
 mod stack_list;
 

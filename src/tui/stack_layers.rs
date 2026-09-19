@@ -227,7 +227,7 @@ fn render_layer_detail(
         .border_style(Style::default().fg(Color::Magenta));
 
     let detail = state
-        .layer_detail_cache
+        .layer_details
         .get(&layer_detail_cache_key(stack, layer));
     let lines = detail_lines(layer, rebase_status, detail);
 
@@ -245,17 +245,17 @@ fn render_layer_detail(
         summary_area,
     );
 
-    let diff = state
-        .layer_diff_cache
-        .get(&layer_diff_cache_key(stack, layer))
-        .map(String::as_str);
-    render_diff_files(frame, files_area, diff, selected_diff_file);
+    let diff_key = layer_diff_cache_key(stack, layer);
+    let diff = state.layer_diffs.get(&diff_key).map(String::as_str);
+    let diff_loading = state.layer_diffs.is_loading(&diff_key);
+    render_diff_files(frame, files_area, diff, diff_loading, selected_diff_file);
     render_diff(
         frame,
         diff_area,
         stack,
         selected,
         diff,
+        diff_loading,
         selected_diff_file,
         diff_scroll,
     );
@@ -290,7 +290,13 @@ fn parse_diff_files(diff: &str) -> Vec<DiffFile> {
     files
 }
 
-fn render_diff_files(frame: &mut Frame, area: Rect, diff: Option<&str>, selected_diff_file: usize) {
+fn render_diff_files(
+    frame: &mut Frame,
+    area: Rect,
+    diff: Option<&str>,
+    is_loading: bool,
+    selected_diff_file: usize,
+) {
     let block = Block::default()
         .title(Span::styled(
             " files ",
@@ -303,8 +309,13 @@ fn render_diff_files(frame: &mut Frame, area: Rect, diff: Option<&str>, selected
         .border_style(Style::default().fg(Color::Blue));
 
     let Some(diff) = diff else {
+        let message = if is_loading {
+            "Loading diff..."
+        } else {
+            "Diff not loaded."
+        };
         frame.render_widget(
-            Paragraph::new("Loading diff...")
+            Paragraph::new(message)
                 .style(Style::default().fg(Color::DarkGray))
                 .block(block),
             area,
@@ -370,6 +381,7 @@ fn render_diff(
     stack: &StackSummary,
     selected_layer: usize,
     diff: Option<&str>,
+    is_loading: bool,
     selected_diff_file: usize,
     diff_scroll: u16,
 ) {
@@ -393,8 +405,13 @@ fn render_diff(
         .border_style(Style::default().fg(Color::Green));
 
     let Some(diff) = diff else {
+        let message = if is_loading {
+            "Loading diff..."
+        } else {
+            "Diff unavailable."
+        };
         frame.render_widget(
-            Paragraph::new("Loading diff...")
+            Paragraph::new(message)
                 .style(Style::default().fg(Color::DarkGray))
                 .block(block),
             area,
@@ -793,7 +810,7 @@ fn active_diff_file_count(state: &AppState, selected: Option<usize>) -> usize {
         return 0;
     };
     state
-        .layer_diff_cache
+        .layer_diffs
         .get(&layer_diff_cache_key(stack, layer))
         .map(|diff| parse_diff_files(diff).len())
         .unwrap_or(0)
@@ -869,8 +886,8 @@ mod tests {
             stacks,
             screen,
             status: None,
-            layer_detail_cache: Default::default(),
-            layer_diff_cache: Default::default(),
+            layer_details: Default::default(),
+            layer_diffs: Default::default(),
             should_quit: false,
         }
     }

@@ -1,15 +1,16 @@
-use std::collections::HashMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use crossterm::event::{self, Event, KeyCode, KeyEventKind};
 use ratatui::DefaultTerminal;
 use ratatui::Frame;
+use tokio::sync::mpsc;
 
 use crate::git;
-use crate::shell::Shell;
+use crate::shell::{ProcessShell, Shell};
 use crate::stack::{Layer, LayerDetail, StackSummary, hydrate_layer_detail, list_stacks};
 
+use super::layer_resource::LayerResourceCache;
 use super::stack_layers;
 use super::stack_list;
 
@@ -48,6 +49,14 @@ pub enum Action {
         layer_index: usize,
         force: bool,
     },
+    LayerDetailLoaded {
+        cache_key: String,
+        result: Result<LayerDetail, String>,
+    },
+    LayerDiffLoaded {
+        cache_key: String,
+        result: Result<String, String>,
+    },
     StacksLoaded(Option<usize>),
     SetStatus(String),
     ClearStatus,
@@ -63,8 +72,8 @@ pub struct AppState {
     pub stacks: Vec<StackSummary>,
     pub screen: Screen,
     pub status: Option<String>,
-    pub layer_detail_cache: HashMap<String, LayerDetail>,
-    pub layer_diff_cache: HashMap<String, String>,
+    pub layer_details: LayerResourceCache<LayerDetail>,
+    pub layer_diffs: LayerResourceCache<String>,
     pub(crate) should_quit: bool,
 }
 
@@ -80,8 +89,8 @@ impl AppState {
             stacks: Vec::new(),
             screen: Screen::List,
             status: None,
-            layer_detail_cache: HashMap::new(),
-            layer_diff_cache: HashMap::new(),
+            layer_details: LayerResourceCache::default(),
+            layer_diffs: LayerResourceCache::default(),
             should_quit: false,
         }
     }
@@ -155,11 +164,25 @@ impl App {
         }
     }
 
-    async fn dispatch_actions(&mut self, actions: Vec<Action>, shell: &impl Shell, repo: &Path) {
+    async fn dispatch_actions_with_loader(
+        &mut self,
+        actions: Vec<Action>,
+        shell: &impl Shell,
+        repo: &Path,
+        loader: Option<&LayerLoadScheduler>,
+    ) {
         let mut pending = std::collections::VecDeque::from(actions);
 
         while let Some(action) = pending.pop_front() {
-            let follow_ups = self.apply_action(&action, shell, repo).await;
+            let follow_ups = if let Some(loader) = loader {
+                if self.schedule_layer_load(&action, loader) {
+                    Vec::new()
+                } else {
+                    self.apply_action(&action, shell, repo).await
+                }
+            } else {
+                self.apply_action(&action, shell, repo).await
+            };
             self.stack_list.update(&action, &mut self.state);
             self.stack_layers.update(&action, &mut self.state);
             pending.extend(follow_ups);
@@ -180,6 +203,84 @@ impl App {
                 });
             }
         }
+    }
+
+    fn schedule_layer_load(&mut self, action: &Action, loader: &LayerLoadScheduler) -> bool {
+        match action {
+            Action::LoadLayerDetail {
+                stack_index,
+                layer_index,
+                force,
+            } => {
+                let Some((cache_key, branch, has_pull_request)) =
+                    self.layer_load_context(*stack_index, *layer_index)
+                else {
+                    self.state.status = Some("selected layer is no longer available".to_string());
+                    return true;
+                };
+
+                if !has_pull_request {
+                    return true;
+                }
+
+                if !self.state.layer_details.should_load(&cache_key, *force) {
+                    return true;
+                }
+
+                self.state.layer_details.mark_loading(cache_key.clone());
+                loader.load_detail(cache_key, branch);
+                true
+            }
+            Action::LoadLayerDiff {
+                stack_index,
+                layer_index,
+                force,
+            } => {
+                let Some((cache_key, branch, lower)) =
+                    self.layer_diff_context(*stack_index, *layer_index)
+                else {
+                    self.state.status = Some("selected layer is no longer available".to_string());
+                    return true;
+                };
+
+                if !self.state.layer_diffs.should_load(&cache_key, *force) {
+                    return true;
+                }
+
+                self.state.layer_diffs.mark_loading(cache_key.clone());
+                loader.load_diff(cache_key, lower, branch);
+                true
+            }
+            _ => false,
+        }
+    }
+
+    fn layer_load_context(
+        &self,
+        stack_index: usize,
+        layer_index: usize,
+    ) -> Option<(String, String, bool)> {
+        let stack = self.state.stacks.get(stack_index)?;
+        let layer = stack.layers.get(layer_index)?;
+        Some((
+            layer_detail_cache_key(stack, layer),
+            layer.branch.clone(),
+            layer.pull_request.is_some(),
+        ))
+    }
+
+    fn layer_diff_context(
+        &self,
+        stack_index: usize,
+        layer_index: usize,
+    ) -> Option<(String, String, String)> {
+        let stack = self.state.stacks.get(stack_index)?;
+        let layer = stack.layers.get(layer_index)?;
+        Some((
+            layer_diff_cache_key(stack, layer),
+            layer.branch.clone(),
+            lower_layer_ref(stack, layer_index),
+        ))
     }
 
     async fn apply_action(
@@ -271,19 +372,32 @@ impl App {
                 }
 
                 let cache_key = layer_detail_cache_key(stack, layer);
-                if !force && self.state.layer_detail_cache.contains_key(&cache_key) {
+                if !self.state.layer_details.should_load(&cache_key, *force) {
                     return Vec::new();
                 }
 
                 match hydrate_layer_detail(shell, repo, &layer.branch).await {
                     Ok(detail) => {
-                        self.state.layer_detail_cache.insert(cache_key, detail);
+                        self.state.layer_details.store_result(cache_key, Ok(detail));
                     }
                     Err(error) => {
-                        self.state.status = Some(format!("failed to load layer detail: {error}"));
+                        let message = error.to_string();
+                        self.state
+                            .layer_details
+                            .store_result(cache_key, Err(message.clone()));
+                        self.state.status = Some(format!("failed to load layer detail: {message}"));
                     }
                 }
 
+                Vec::new()
+            }
+            Action::LayerDetailLoaded { cache_key, result } => {
+                if let Err(error) = result {
+                    self.state.status = Some(format!("failed to load layer detail: {error}"));
+                }
+                self.state
+                    .layer_details
+                    .store_result(cache_key.clone(), result.clone());
                 Vec::new()
             }
             Action::LoadLayerDiff {
@@ -302,20 +416,33 @@ impl App {
                 };
 
                 let cache_key = layer_diff_cache_key(stack, layer);
-                if !force && self.state.layer_diff_cache.contains_key(&cache_key) {
+                if !self.state.layer_diffs.should_load(&cache_key, *force) {
                     return Vec::new();
                 }
 
                 let lower = lower_layer_ref(stack, *layer_index);
                 match git::diff(shell, repo, &lower, &layer.branch).await {
                     Ok(diff) => {
-                        self.state.layer_diff_cache.insert(cache_key, diff);
+                        self.state.layer_diffs.store_result(cache_key, Ok(diff));
                     }
                     Err(error) => {
-                        self.state.status = Some(format!("failed to load layer diff: {error}"));
+                        let message = error.to_string();
+                        self.state
+                            .layer_diffs
+                            .store_result(cache_key, Err(message.clone()));
+                        self.state.status = Some(format!("failed to load layer diff: {message}"));
                     }
                 }
 
+                Vec::new()
+            }
+            Action::LayerDiffLoaded { cache_key, result } => {
+                if let Err(error) = result {
+                    self.state.status = Some(format!("failed to load layer diff: {error}"));
+                }
+                self.state
+                    .layer_diffs
+                    .store_result(cache_key.clone(), result.clone());
                 Vec::new()
             }
             Action::SetStatus(message) => {
@@ -345,6 +472,39 @@ impl App {
     }
 }
 
+struct LayerLoadScheduler {
+    repo: PathBuf,
+    tx: mpsc::UnboundedSender<Action>,
+}
+
+impl LayerLoadScheduler {
+    fn new(repo: PathBuf, tx: mpsc::UnboundedSender<Action>) -> Self {
+        Self { repo, tx }
+    }
+
+    fn load_detail(&self, cache_key: String, branch: String) {
+        let repo = self.repo.clone();
+        let tx = self.tx.clone();
+        tokio::spawn(async move {
+            let result = hydrate_layer_detail(&ProcessShell, repo.as_path(), &branch)
+                .await
+                .map_err(|error| error.to_string());
+            let _ = tx.send(Action::LayerDetailLoaded { cache_key, result });
+        });
+    }
+
+    fn load_diff(&self, cache_key: String, lower: String, branch: String) {
+        let repo = self.repo.clone();
+        let tx = self.tx.clone();
+        tokio::spawn(async move {
+            let result = git::diff(&ProcessShell, repo.as_path(), &lower, &branch)
+                .await
+                .map_err(|error| error.to_string());
+            let _ = tx.send(Action::LayerDiffLoaded { cache_key, result });
+        });
+    }
+}
+
 /// Runs the TUI until the user quits, then restores the terminal.
 pub async fn run(shell: &impl Shell, repo: &Path) -> anyhow::Result<()> {
     let mut terminal = ratatui::init();
@@ -360,10 +520,18 @@ async fn run_app(
     repo: &Path,
 ) -> anyhow::Result<()> {
     let mut app = App::new();
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    let loader = LayerLoadScheduler::new(repo.to_path_buf(), tx);
     let initial_actions = app.refresh(shell, repo).await;
-    app.dispatch_actions(initial_actions, shell, repo).await;
+    app.dispatch_actions_with_loader(initial_actions, shell, repo, Some(&loader))
+        .await;
 
     while !app.state.should_quit {
+        while let Ok(action) = rx.try_recv() {
+            app.dispatch_actions_with_loader(vec![action], shell, repo, Some(&loader))
+                .await;
+        }
+
         terminal.draw(|frame| app.draw(frame))?;
 
         if event::poll(Duration::from_millis(100))?
@@ -371,7 +539,8 @@ async fn run_app(
             && key.kind == KeyEventKind::Press
         {
             let actions = app.handle_key(key.code);
-            app.dispatch_actions(actions, shell, repo).await;
+            app.dispatch_actions_with_loader(actions, shell, repo, Some(&loader))
+                .await;
         }
     }
 
@@ -498,6 +667,6 @@ mod tests {
         .await;
 
         let key = layer_diff_cache_key(&app.state.stacks[0], &app.state.stacks[0].layers[0]);
-        assert_eq!(app.state.layer_diff_cache.get(&key).unwrap(), "+bottom");
+        assert_eq!(app.state.layer_diffs.get(&key).unwrap(), "+bottom");
     }
 }

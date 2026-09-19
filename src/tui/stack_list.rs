@@ -307,8 +307,8 @@ mod tests {
             ],
             screen: Screen::List,
             status: None,
-            layer_detail_cache: Default::default(),
-            layer_diff_cache: Default::default(),
+            layer_details: Default::default(),
+            layer_diffs: Default::default(),
             should_quit: false,
         }
     }
