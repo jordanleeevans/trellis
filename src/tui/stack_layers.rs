@@ -818,8 +818,8 @@ impl Component for StackLayers {
                 self.scroll_diff_line_up();
             }
             Action::StacksLoaded(selected_stack) => {
-                let selected_stack =
-                    selected_stack.or_else(|| selected_stack_index(state, self.stack_list_state.selected()));
+                let selected_stack = selected_stack
+                    .or_else(|| selected_stack_index(state, self.stack_list_state.selected()));
                 self.stack_list_state.select(selected_stack);
                 let active_stack =
                     selected_stack.and_then(|stack_index| state.stacks.get(stack_index));
