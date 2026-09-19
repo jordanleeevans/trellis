@@ -752,10 +752,8 @@ impl Component for StackLayers {
                         .unwrap_or_default()
                 }
             }
-            Some(KeyIntent::DrillIn) if self.active_panel == ActivePanel::Stacks => {
-                vec![Action::FocusNextPanel]
-            }
-            Some(KeyIntent::DrillIn) | Some(KeyIntent::OpenExternal) => self
+            Some(KeyIntent::DrillIn) => vec![Action::FocusNextPanel],
+            Some(KeyIntent::OpenExternal) => self
                 .list_state
                 .selected()
                 .map(|layer_index| {

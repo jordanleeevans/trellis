@@ -501,6 +501,7 @@ impl App {
                     && index >= self.state.stacks.len()
                 {
                     self.state.screen = Screen::List;
+                    self.state.status = Some("selected stack is no longer available".to_string());
                 }
                 Vec::new()
             }
