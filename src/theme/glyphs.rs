@@ -14,6 +14,9 @@ pub enum Glyph {
     Running,
     GitHub,
     OpenExternal,
+    Folder,
+    FolderOpen,
+    File,
     Up,
     Down,
 }
@@ -36,6 +39,9 @@ pub const NERD_FONT: GlyphSet = GlyphSet {
 
     github: "",
     open_external: "",
+    folder: "",
+    folder_open: "",
+    file: "󰈔",
 
     up: "",
     down: "",
@@ -59,6 +65,9 @@ pub const ASCII: GlyphSet = GlyphSet {
 
     github: "GH",
     open_external: "->",
+    folder: "[+]",
+    folder_open: "[-]",
+    file: "[F]",
 
     up: "^",
     down: "v",
@@ -83,6 +92,9 @@ pub struct GlyphSet {
 
     pub github: &'static str,
     pub open_external: &'static str,
+    pub folder: &'static str,
+    pub folder_open: &'static str,
+    pub file: &'static str,
 
     pub up: &'static str,
     pub down: &'static str,
@@ -105,6 +117,9 @@ impl GlyphSet {
             Glyph::Running => self.running,
             Glyph::GitHub => self.github,
             Glyph::OpenExternal => self.open_external,
+            Glyph::Folder => self.folder,
+            Glyph::FolderOpen => self.folder_open,
+            Glyph::File => self.file,
             Glyph::Up => self.up,
             Glyph::Down => self.down,
         }

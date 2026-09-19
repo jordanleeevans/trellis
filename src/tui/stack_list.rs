@@ -1,4 +1,4 @@
-use crossterm::event::KeyCode;
+use crossterm::event::KeyEvent;
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Modifier, Style};
@@ -198,6 +198,8 @@ fn footer_line(state: &AppState) -> Line<'static> {
                 Span::raw(" select  "),
                 Span::styled("enter", THEME.text.key.fg(THEME.colors.success)),
                 Span::raw(" view  "),
+                Span::styled("c", THEME.text.key.fg(THEME.colors.secondary)),
+                Span::raw(" checkout  "),
                 Span::styled("r", THEME.text.key.fg(THEME.colors.warning)),
                 Span::raw(" refresh  "),
                 Span::styled("q", THEME.text.key.fg(THEME.colors.danger)),
@@ -216,8 +218,8 @@ impl Component for StackList {
         render(frame, state, &mut self.list_state);
     }
 
-    fn handle_key(&mut self, code: KeyCode, _state: &AppState) -> Vec<Action> {
-        match key_intent(code) {
+    fn handle_key(&mut self, key: KeyEvent, _state: &AppState) -> Vec<Action> {
+        match key_intent(key) {
             Some(KeyIntent::Back) => vec![Action::Quit],
             Some(KeyIntent::Refresh) => vec![Action::RefreshStacks],
             Some(KeyIntent::MoveDown) => vec![Action::SelectNext],
@@ -226,6 +228,16 @@ impl Component for StackList {
                 .list_state
                 .selected()
                 .map(|index| vec![Action::ShowLayers(index)])
+                .unwrap_or_default(),
+            Some(KeyIntent::Checkout) => self
+                .list_state
+                .selected()
+                .map(|stack_index| {
+                    vec![Action::CheckoutSelected {
+                        stack_index,
+                        layer_index: None,
+                    }]
+                })
                 .unwrap_or_default(),
             _ => Vec::new(),
         }
@@ -276,6 +288,7 @@ fn select_previous(state: &mut ListState, count: usize) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
     use crate::tui::app::Screen;
 
     fn app_state() -> AppState {
@@ -306,6 +319,10 @@ mod tests {
             layer_diffs: Default::default(),
             should_quit: false,
         }
+    }
+
+    fn key(code: KeyCode) -> KeyEvent {
+        KeyEvent::new(code, KeyModifiers::NONE)
     }
 
     #[test]
@@ -352,5 +369,22 @@ mod tests {
             .collect::<String>();
         assert!(text.contains("error:"));
         assert!(text.contains("dismiss"));
+    }
+
+    #[test]
+    fn handle_key_dispatches_checkout_for_selected_stack() {
+        let mut component = StackList::new();
+        let mut state = app_state();
+        component.update(&Action::StacksLoaded(Some(1)), &mut state);
+
+        let actions = component.handle_key(key(KeyCode::Char('c')), &state);
+
+        assert!(matches!(
+            actions.as_slice(),
+            [Action::CheckoutSelected {
+                stack_index: 1,
+                layer_index: None
+            }]
+        ));
     }
 }
