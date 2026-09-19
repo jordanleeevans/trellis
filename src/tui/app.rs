@@ -6,6 +6,7 @@ use crossterm::event::{self, Event, KeyCode, KeyEventKind};
 use ratatui::DefaultTerminal;
 use ratatui::Frame;
 
+use crate::git;
 use crate::shell::Shell;
 use crate::stack::{Layer, LayerDetail, StackSummary, hydrate_layer_detail, list_stacks};
 
@@ -27,6 +28,10 @@ pub enum Action {
     RefreshStacks,
     SelectNext,
     SelectPrevious,
+    SelectNextDiffFile,
+    SelectPreviousDiffFile,
+    ScrollDiffDown,
+    ScrollDiffUp,
     ShowLayers(usize),
     ShowList,
     OpenPullRequest {
@@ -34,6 +39,11 @@ pub enum Action {
         layer_index: usize,
     },
     LoadLayerDetail {
+        stack_index: usize,
+        layer_index: usize,
+        force: bool,
+    },
+    LoadLayerDiff {
         stack_index: usize,
         layer_index: usize,
         force: bool,
@@ -54,6 +64,7 @@ pub struct AppState {
     pub screen: Screen,
     pub status: Option<String>,
     pub layer_detail_cache: HashMap<String, LayerDetail>,
+    pub layer_diff_cache: HashMap<String, String>,
     pub(crate) should_quit: bool,
 }
 
@@ -70,6 +81,7 @@ impl AppState {
             screen: Screen::List,
             status: None,
             layer_detail_cache: HashMap::new(),
+            layer_diff_cache: HashMap::new(),
             should_quit: false,
         }
     }
@@ -161,6 +173,11 @@ impl App {
                     layer_index,
                     force: false,
                 });
+                pending.push_back(Action::LoadLayerDiff {
+                    stack_index,
+                    layer_index,
+                    force: false,
+                });
             }
         }
     }
@@ -189,11 +206,18 @@ impl App {
                         self.state.status = None;
                     }
 
-                    vec![Action::LoadLayerDetail {
-                        stack_index: *index,
-                        layer_index: 0,
-                        force: false,
-                    }]
+                    vec![
+                        Action::LoadLayerDetail {
+                            stack_index: *index,
+                            layer_index: 0,
+                            force: false,
+                        },
+                        Action::LoadLayerDiff {
+                            stack_index: *index,
+                            layer_index: 0,
+                            force: false,
+                        },
+                    ]
                 } else {
                     self.state.screen = Screen::List;
                     self.state.status = Some("selected stack is no longer available".to_string());
@@ -262,6 +286,38 @@ impl App {
 
                 Vec::new()
             }
+            Action::LoadLayerDiff {
+                stack_index,
+                layer_index,
+                force,
+            } => {
+                let Some(stack) = self.state.stacks.get(*stack_index) else {
+                    self.state.status = Some("selected stack is no longer available".to_string());
+                    return Vec::new();
+                };
+
+                let Some(layer) = stack.layers.get(*layer_index) else {
+                    self.state.status = Some("selected layer is no longer available".to_string());
+                    return Vec::new();
+                };
+
+                let cache_key = layer_diff_cache_key(stack, layer);
+                if !force && self.state.layer_diff_cache.contains_key(&cache_key) {
+                    return Vec::new();
+                }
+
+                let lower = lower_layer_ref(stack, *layer_index);
+                match git::diff(shell, repo, &lower, &layer.branch).await {
+                    Ok(diff) => {
+                        self.state.layer_diff_cache.insert(cache_key, diff);
+                    }
+                    Err(error) => {
+                        self.state.status = Some(format!("failed to load layer diff: {error}"));
+                    }
+                }
+
+                Vec::new()
+            }
             Action::SetStatus(message) => {
                 self.state.status = Some(message.clone());
                 Vec::new()
@@ -279,7 +335,12 @@ impl App {
                 }
                 Vec::new()
             }
-            Action::SelectNext | Action::SelectPrevious => Vec::new(),
+            Action::SelectNext
+            | Action::SelectPrevious
+            | Action::SelectNextDiffFile
+            | Action::SelectPreviousDiffFile
+            | Action::ScrollDiffDown
+            | Action::ScrollDiffUp => Vec::new(),
         }
     }
 }
@@ -321,6 +382,19 @@ pub fn layer_detail_cache_key(stack: &StackSummary, layer: &Layer) -> String {
     format!("{}::{}", stack.label, layer.branch)
 }
 
+pub fn layer_diff_cache_key(stack: &StackSummary, layer: &Layer) -> String {
+    format!("{}::{}::diff", stack.label, layer.branch)
+}
+
+pub fn lower_layer_ref(stack: &StackSummary, layer_index: usize) -> String {
+    stack
+        .layers
+        .get(layer_index.saturating_sub(1))
+        .filter(|_| layer_index > 0)
+        .map(|layer| layer.branch.clone())
+        .unwrap_or_else(|| stack.trunk.clone())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -338,6 +412,31 @@ mod tests {
         );
     }
 
+    #[test]
+    fn layer_diff_cache_key_includes_stack_and_branch() {
+        let stack = stack_summary("stack-a", 1);
+        let layer = layer("feature/layer-1");
+
+        assert_eq!(
+            layer_diff_cache_key(&stack, &layer),
+            "stack-a::feature/layer-1::diff"
+        );
+    }
+
+    #[test]
+    fn lower_layer_ref_uses_trunk_for_bottom_layer() {
+        let stack = stack_summary("stack-a", 2);
+
+        assert_eq!(lower_layer_ref(&stack, 0), "main");
+    }
+
+    #[test]
+    fn lower_layer_ref_uses_previous_layer_for_higher_layers() {
+        let stack = stack_summary("stack-a", 2);
+
+        assert_eq!(lower_layer_ref(&stack, 1), "stack-a-layer-0");
+    }
+
     #[tokio::test]
     async fn show_layers_loads_first_layer_detail() {
         let repo = std::env::current_dir().unwrap();
@@ -352,11 +451,53 @@ mod tests {
         assert!(matches!(app.state.screen, Screen::Layers(0)));
         assert!(matches!(
             follow_ups.as_slice(),
-            [Action::LoadLayerDetail {
+            [
+                Action::LoadLayerDetail {
+                    stack_index: 0,
+                    layer_index: 0,
+                    force: false,
+                },
+                Action::LoadLayerDiff {
+                    stack_index: 0,
+                    layer_index: 0,
+                    force: false,
+                }
+            ]
+        ));
+    }
+
+    #[tokio::test]
+    async fn load_layer_diff_diffs_bottom_layer_against_trunk() {
+        let repo = std::env::current_dir().unwrap();
+        let shell = MockShell::new().when(
+            "git",
+            &[
+                "diff",
+                "--color=never",
+                "--find-renames",
+                "main..stack-a-layer-0",
+            ],
+            Ok(crate::shell::ShellOutput {
+                stdout: "+bottom".to_string(),
+                stderr: String::new(),
+                exit_code: 0,
+            }),
+        );
+        let mut app = App::new();
+        app.state.stacks = vec![stack_summary("stack-a", 2)];
+
+        app.apply_action(
+            &Action::LoadLayerDiff {
                 stack_index: 0,
                 layer_index: 0,
                 force: false,
-            }]
-        ));
+            },
+            &shell,
+            repo.as_path(),
+        )
+        .await;
+
+        let key = layer_diff_cache_key(&app.state.stacks[0], &app.state.stacks[0].layers[0]);
+        assert_eq!(app.state.layer_diff_cache.get(&key).unwrap(), "+bottom");
     }
 }

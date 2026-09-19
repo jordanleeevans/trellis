@@ -7,11 +7,17 @@ use ratatui::widgets::{Block, BorderType, Borders, List, ListItem, ListState, Pa
 
 use crate::stack::{Layer, LayerDetail, StackSummary};
 use crate::theme::glyphs::{GlyphSet, NERD_FONT};
-use crate::tui::app::{Action, AppState, Component, Screen, layer_detail_cache_key};
+use crate::tui::app::{
+    Action, AppState, Component, Screen, layer_detail_cache_key, layer_diff_cache_key,
+    lower_layer_ref,
+};
 
 pub struct StackLayers {
     list_state: ListState,
     active_stack_label: Option<String>,
+    selected_diff_file: usize,
+    diff_scroll: u16,
+    active_layer_key: Option<String>,
 }
 
 impl StackLayers {
@@ -19,6 +25,9 @@ impl StackLayers {
         Self {
             list_state: ListState::default(),
             active_stack_label: None,
+            selected_diff_file: 0,
+            diff_scroll: 0,
+            active_layer_key: None,
         }
     }
 
@@ -27,7 +36,14 @@ impl StackLayers {
     }
 }
 
-fn render(frame: &mut Frame, state: &AppState, list_state: &mut ListState, index: usize) {
+fn render(
+    frame: &mut Frame,
+    state: &AppState,
+    list_state: &mut ListState,
+    index: usize,
+    selected_diff_file: usize,
+    diff_scroll: u16,
+) {
     let [header_area, content_area, footer_area] = Layout::vertical([
         Constraint::Length(3),
         Constraint::Min(0),
@@ -41,7 +57,15 @@ fn render(frame: &mut Frame, state: &AppState, list_state: &mut ListState, index
     };
 
     render_header(frame, header_area, stack);
-    render_stack(frame, content_area, state, stack, list_state);
+    render_stack(
+        frame,
+        content_area,
+        state,
+        stack,
+        list_state,
+        selected_diff_file,
+        diff_scroll,
+    );
     render_footer(frame, footer_area);
 }
 
@@ -76,7 +100,11 @@ fn render_footer(frame: &mut Frame, area: Rect) {
         Span::styled("O", Style::default().add_modifier(Modifier::BOLD)),
         Span::raw(" open PR  "),
         Span::styled("r", Style::default().add_modifier(Modifier::BOLD)),
-        Span::raw(" refresh detail  "),
+        Span::raw(" refresh  "),
+        Span::styled("[/]", Style::default().add_modifier(Modifier::BOLD)),
+        Span::raw(" files  "),
+        Span::styled("PgUp/PgDn", Style::default().add_modifier(Modifier::BOLD)),
+        Span::raw(" diff  "),
         Span::styled("esc/q", Style::default().add_modifier(Modifier::BOLD)),
         Span::raw(" back"),
     ]);
@@ -90,6 +118,8 @@ fn render_stack(
     state: &AppState,
     stack: &StackSummary,
     list_state: &mut ListState,
+    selected_diff_file: usize,
+    diff_scroll: u16,
 ) {
     let [list_area, detail_area] = Layout::new(
         Direction::Horizontal,
@@ -126,7 +156,15 @@ fn render_stack(
 
     frame.render_stateful_widget(list, list_area, list_state);
 
-    render_layer_detail(frame, detail_area, state, stack, list_state.selected());
+    render_layer_detail(
+        frame,
+        detail_area,
+        state,
+        stack,
+        list_state.selected(),
+        selected_diff_file,
+        diff_scroll,
+    );
 }
 
 fn render_layer_detail(
@@ -135,6 +173,8 @@ fn render_layer_detail(
     state: &AppState,
     stack: &StackSummary,
     selected: Option<usize>,
+    selected_diff_file: usize,
+    diff_scroll: u16,
 ) {
     let Some(selected) = selected else {
         frame.render_widget(
@@ -191,12 +231,216 @@ fn render_layer_detail(
         .get(&layer_detail_cache_key(stack, layer));
     let lines = detail_lines(layer, rebase_status, detail);
 
+    let [summary_area, files_area, diff_area] = Layout::vertical([
+        Constraint::Length(9),
+        Constraint::Length(6),
+        Constraint::Min(0),
+    ])
+    .areas(area);
+
     frame.render_widget(
         Paragraph::new(lines)
             .block(detail_block)
             .wrap(Wrap { trim: false }),
-        area,
+        summary_area,
     );
+
+    let diff = state
+        .layer_diff_cache
+        .get(&layer_diff_cache_key(stack, layer))
+        .map(String::as_str);
+    render_diff_files(frame, files_area, diff, selected_diff_file);
+    render_diff(
+        frame,
+        diff_area,
+        stack,
+        selected,
+        diff,
+        selected_diff_file,
+        diff_scroll,
+    );
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct DiffFile {
+    path: String,
+    start: usize,
+    end: usize,
+}
+
+fn parse_diff_files(diff: &str) -> Vec<DiffFile> {
+    let lines: Vec<&str> = diff.lines().collect();
+    let mut files: Vec<DiffFile> = Vec::new();
+
+    for (index, line) in lines.iter().enumerate() {
+        if let Some(path) = line.strip_prefix("diff --git a/") {
+            if let Some(previous) = files.last_mut() {
+                previous.end = index;
+            }
+
+            let path = path.split(" b/").nth(1).unwrap_or(path).to_string();
+            files.push(DiffFile {
+                path,
+                start: index,
+                end: lines.len(),
+            });
+        }
+    }
+
+    files
+}
+
+fn render_diff_files(frame: &mut Frame, area: Rect, diff: Option<&str>, selected_diff_file: usize) {
+    let block = Block::default()
+        .title(Span::styled(
+            " files ",
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        ))
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(Color::Blue));
+
+    let Some(diff) = diff else {
+        frame.render_widget(
+            Paragraph::new("Loading diff...")
+                .style(Style::default().fg(Color::DarkGray))
+                .block(block),
+            area,
+        );
+        return;
+    };
+
+    let files = parse_diff_files(diff);
+    if files.is_empty() {
+        frame.render_widget(
+            Paragraph::new("No changes in this layer.")
+                .style(Style::default().fg(Color::DarkGray))
+                .block(block),
+            area,
+        );
+        return;
+    }
+
+    let visible_rows = area.height.saturating_sub(2) as usize;
+    let visible_range = visible_file_range(selected_diff_file, files.len(), visible_rows);
+    let visible_start = visible_range.start;
+    let items = files[visible_range]
+        .iter()
+        .enumerate()
+        .map(|(offset, file)| (visible_start + offset, file))
+        .map(|(index, file)| {
+            let marker = if index == selected_diff_file {
+                ">"
+            } else {
+                " "
+            };
+            ListItem::new(Line::from(format!("{marker} {}", file.path)))
+        })
+        .collect::<Vec<_>>();
+
+    frame.render_widget(List::new(items).block(block), area);
+}
+
+fn visible_file_range(
+    selected_index: usize,
+    file_count: usize,
+    visible_rows: usize,
+) -> std::ops::Range<usize> {
+    if file_count == 0 || visible_rows == 0 {
+        return 0..0;
+    }
+
+    let selected_index = selected_index.min(file_count - 1);
+    let visible_rows = visible_rows.min(file_count);
+    let half_window = visible_rows / 2;
+    let mut start = selected_index.saturating_sub(half_window);
+
+    if start + visible_rows > file_count {
+        start = file_count - visible_rows;
+    }
+
+    start..start + visible_rows
+}
+
+fn render_diff(
+    frame: &mut Frame,
+    area: Rect,
+    stack: &StackSummary,
+    selected_layer: usize,
+    diff: Option<&str>,
+    selected_diff_file: usize,
+    diff_scroll: u16,
+) {
+    let Some(layer) = stack.layers.get(selected_layer) else {
+        return;
+    };
+    let title = format!(
+        " diff {}..{} ",
+        lower_layer_ref(stack, selected_layer),
+        layer.branch
+    );
+    let block = Block::default()
+        .title(Span::styled(
+            title,
+            Style::default()
+                .fg(Color::Green)
+                .add_modifier(Modifier::BOLD),
+        ))
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(Color::Green));
+
+    let Some(diff) = diff else {
+        frame.render_widget(
+            Paragraph::new("Loading diff...")
+                .style(Style::default().fg(Color::DarkGray))
+                .block(block),
+            area,
+        );
+        return;
+    };
+
+    let files = parse_diff_files(diff);
+    if files.is_empty() {
+        frame.render_widget(Paragraph::new("No changes.").block(block), area);
+        return;
+    }
+
+    let lines = diff.lines().collect::<Vec<_>>();
+    let file = &files[selected_diff_file.min(files.len() - 1)];
+    let visible_height = area.height.saturating_sub(2) as usize;
+    let start = (file.start + usize::from(diff_scroll)).min(file.end);
+    let end = (start + visible_height).min(file.end);
+    let rendered = lines[start..end]
+        .iter()
+        .map(|line| diff_line(line))
+        .collect::<Vec<_>>();
+
+    frame.render_widget(Paragraph::new(rendered).block(block), area);
+}
+
+fn diff_line(text: &str) -> Line<'static> {
+    let style = if text.starts_with("+++") || text.starts_with("---") {
+        Style::default().fg(Color::DarkGray)
+    } else if text.starts_with('+') {
+        Style::default().fg(Color::Green)
+    } else if text.starts_with('-') {
+        Style::default().fg(Color::Red)
+    } else if text.starts_with("@@") {
+        Style::default()
+            .fg(Color::Cyan)
+            .add_modifier(Modifier::BOLD)
+    } else if text.starts_with("diff --git") {
+        Style::default()
+            .fg(Color::Magenta)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default()
+    };
+
+    Line::from(Span::styled(text.to_string(), style))
 }
 
 fn detail_lines(
@@ -373,7 +617,14 @@ fn row(layer: &Layer) -> Line<'static> {
 impl Component for StackLayers {
     fn draw(&mut self, frame: &mut Frame, state: &AppState) {
         if let Screen::Layers(index) = state.screen {
-            render(frame, state, &mut self.list_state, index);
+            render(
+                frame,
+                state,
+                &mut self.list_state,
+                index,
+                self.selected_diff_file,
+                self.diff_scroll,
+            );
         }
     }
 
@@ -386,15 +637,26 @@ impl Component for StackLayers {
             KeyCode::Char('q') | KeyCode::Esc => vec![Action::ShowList],
             KeyCode::Down | KeyCode::Char('j') => vec![Action::SelectNext],
             KeyCode::Up | KeyCode::Char('k') => vec![Action::SelectPrevious],
+            KeyCode::Char(']') => vec![Action::SelectNextDiffFile],
+            KeyCode::Char('[') => vec![Action::SelectPreviousDiffFile],
+            KeyCode::PageDown | KeyCode::Char(' ') => vec![Action::ScrollDiffDown],
+            KeyCode::PageUp | KeyCode::Backspace => vec![Action::ScrollDiffUp],
             KeyCode::Char('r') => self
                 .list_state
                 .selected()
                 .map(|layer_index| {
-                    vec![Action::LoadLayerDetail {
-                        stack_index,
-                        layer_index,
-                        force: true,
-                    }]
+                    vec![
+                        Action::LoadLayerDetail {
+                            stack_index,
+                            layer_index,
+                            force: true,
+                        },
+                        Action::LoadLayerDiff {
+                            stack_index,
+                            layer_index,
+                            force: true,
+                        },
+                    ]
                 })
                 .unwrap_or_default(),
             KeyCode::Char('O') => self
@@ -425,12 +687,27 @@ impl Component for StackLayers {
                     clamped_selection(count, self.list_state.selected(), preserve_selection);
                 self.list_state.select(next_selection);
                 self.active_stack_label = stack_label;
+                self.reset_diff_view_for_selection(state);
             }
             Action::SelectNext if matches!(state.screen, Screen::Layers(_)) => {
                 select_next(&mut self.list_state, active_layer_count(state));
+                self.reset_diff_view_for_selection(state);
             }
             Action::SelectPrevious if matches!(state.screen, Screen::Layers(_)) => {
                 select_previous(&mut self.list_state, active_layer_count(state));
+                self.reset_diff_view_for_selection(state);
+            }
+            Action::SelectNextDiffFile => {
+                self.select_next_diff_file(state);
+            }
+            Action::SelectPreviousDiffFile => {
+                self.select_previous_diff_file(state);
+            }
+            Action::ScrollDiffDown => {
+                self.scroll_diff_down();
+            }
+            Action::ScrollDiffUp => {
+                self.scroll_diff_up();
             }
             Action::StacksLoaded(_) => {
                 let active_stack = if let Screen::Layers(stack_index) = state.screen {
@@ -446,10 +723,80 @@ impl Component for StackLayers {
                     clamped_selection(layer_count, self.list_state.selected(), preserve_selection);
                 self.list_state.select(next_selection);
                 self.active_stack_label = active_label;
+                self.reset_diff_view_for_selection(state);
             }
             _ => {}
         }
     }
+}
+
+impl StackLayers {
+    fn reset_diff_view_for_selection(&mut self, state: &AppState) {
+        let next_key = active_layer_key(state, self.list_state.selected());
+        if self.active_layer_key != next_key {
+            self.selected_diff_file = 0;
+            self.diff_scroll = 0;
+            self.active_layer_key = next_key;
+        }
+    }
+
+    fn select_next_diff_file(&mut self, state: &AppState) {
+        let count = active_diff_file_count(state, self.list_state.selected());
+        if count == 0 {
+            self.selected_diff_file = 0;
+            return;
+        }
+        self.selected_diff_file = (self.selected_diff_file + 1) % count;
+        self.diff_scroll = 0;
+    }
+
+    fn select_previous_diff_file(&mut self, state: &AppState) {
+        let count = active_diff_file_count(state, self.list_state.selected());
+        if count == 0 {
+            self.selected_diff_file = 0;
+            return;
+        }
+        self.selected_diff_file = if self.selected_diff_file == 0 {
+            count - 1
+        } else {
+            self.selected_diff_file - 1
+        };
+        self.diff_scroll = 0;
+    }
+
+    fn scroll_diff_down(&mut self) {
+        self.diff_scroll = self.diff_scroll.saturating_add(12);
+    }
+
+    fn scroll_diff_up(&mut self) {
+        self.diff_scroll = self.diff_scroll.saturating_sub(12);
+    }
+}
+
+fn active_layer_key(state: &AppState, selected: Option<usize>) -> Option<String> {
+    let Screen::Layers(stack_index) = state.screen else {
+        return None;
+    };
+    let stack = state.stacks.get(stack_index)?;
+    let layer = stack.layers.get(selected?)?;
+    Some(layer_diff_cache_key(stack, layer))
+}
+
+fn active_diff_file_count(state: &AppState, selected: Option<usize>) -> usize {
+    let Screen::Layers(stack_index) = state.screen else {
+        return 0;
+    };
+    let Some(stack) = state.stacks.get(stack_index) else {
+        return 0;
+    };
+    let Some(layer) = selected.and_then(|index| stack.layers.get(index)) else {
+        return 0;
+    };
+    state
+        .layer_diff_cache
+        .get(&layer_diff_cache_key(stack, layer))
+        .map(|diff| parse_diff_files(diff).len())
+        .unwrap_or(0)
 }
 
 fn active_layer_count(state: &AppState) -> usize {
@@ -523,6 +870,7 @@ mod tests {
             screen,
             status: None,
             layer_detail_cache: Default::default(),
+            layer_diff_cache: Default::default(),
             should_quit: false,
         }
     }
@@ -598,11 +946,18 @@ mod tests {
         assert!(matches!(previous.as_slice(), [Action::SelectPrevious]));
         assert!(matches!(
             refresh.as_slice(),
-            [Action::LoadLayerDetail {
-                stack_index: 0,
-                layer_index: 0,
-                force: true,
-            }]
+            [
+                Action::LoadLayerDetail {
+                    stack_index: 0,
+                    layer_index: 0,
+                    force: true,
+                },
+                Action::LoadLayerDiff {
+                    stack_index: 0,
+                    layer_index: 0,
+                    force: true,
+                }
+            ]
         ));
     }
 
@@ -621,6 +976,61 @@ mod tests {
                 layer_index: 1
             }]
         ));
+    }
+
+    #[test]
+    fn parse_diff_files_finds_each_file_range() {
+        let diff = [
+            "diff --git a/src/a.rs b/src/a.rs",
+            "index 123..456 100644",
+            "--- a/src/a.rs",
+            "+++ b/src/a.rs",
+            "@@ -1 +1 @@",
+            "-old",
+            "+new",
+            "diff --git a/src/b.rs b/src/b.rs",
+            "@@ -3 +3 @@",
+            "+more",
+        ]
+        .join("\n");
+
+        let files = parse_diff_files(&diff);
+
+        assert_eq!(
+            files,
+            vec![
+                DiffFile {
+                    path: "src/a.rs".to_string(),
+                    start: 0,
+                    end: 7,
+                },
+                DiffFile {
+                    path: "src/b.rs".to_string(),
+                    start: 7,
+                    end: 10,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn visible_file_range_keeps_early_selection_at_top() {
+        assert_eq!(visible_file_range(1, 10, 4), 0..4);
+    }
+
+    #[test]
+    fn visible_file_range_centers_middle_selection() {
+        assert_eq!(visible_file_range(6, 12, 5), 4..9);
+    }
+
+    #[test]
+    fn visible_file_range_keeps_late_selection_visible_at_bottom() {
+        assert_eq!(visible_file_range(11, 12, 5), 7..12);
+    }
+
+    #[test]
+    fn visible_file_range_handles_no_visible_rows() {
+        assert_eq!(visible_file_range(3, 10, 0), 0..0);
     }
 
     #[test]
