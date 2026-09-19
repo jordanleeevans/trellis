@@ -133,6 +133,8 @@ fn footer_line(state: &AppState) -> Line<'static> {
             Span::raw(" navigate  "),
             Span::styled("O", THEME.text.key),
             Span::raw(" open PR  "),
+            Span::styled("c", THEME.text.key),
+            Span::raw(" checkout  "),
             Span::styled("r", THEME.text.key),
             Span::raw(" refresh  "),
             Span::styled("tab/h/l", THEME.text.key),
@@ -672,6 +674,16 @@ impl Component for StackLayers {
                     ]
                 })
                 .unwrap_or_default(),
+            Some(KeyIntent::Checkout) => self
+                .list_state
+                .selected()
+                .map(|layer_index| {
+                    vec![Action::CheckoutSelected {
+                        stack_index,
+                        layer_index: Some(layer_index),
+                    }]
+                })
+                .unwrap_or_default(),
             Some(KeyIntent::DrillIn) | Some(KeyIntent::OpenExternal) => self
                 .list_state
                 .selected()
@@ -1034,6 +1046,23 @@ mod tests {
             [Action::OpenPullRequest {
                 stack_index: 0,
                 layer_index: 1
+            }]
+        ));
+    }
+
+    #[test]
+    fn handle_key_dispatches_checkout_for_selected_layer() {
+        let mut component = StackLayers::new();
+        let mut state = app_state(vec![stack_summary("a", 3)], Screen::Layers(0));
+        component.update(&Action::ShowLayers(0), &mut state);
+        component.update(&Action::SelectNext, &mut state);
+
+        let actions = component.handle_key(KeyCode::Char('c'), &state);
+        assert!(matches!(
+            actions.as_slice(),
+            [Action::CheckoutSelected {
+                stack_index: 0,
+                layer_index: Some(1)
             }]
         ));
     }
