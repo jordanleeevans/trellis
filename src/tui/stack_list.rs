@@ -10,7 +10,7 @@ use crate::stack::{PrCounts, StackSummary};
 use crate::theme::glyphs::{GlyphSet, NERD_FONT};
 use crate::theme::ui::THEME;
 
-use super::app::{Action, AppState, Component, Screen};
+use super::app::{Action, AppState, Component, Screen, spinner_frame};
 use super::keymap::{KeyIntent, key_intent};
 
 pub struct StackList {
@@ -160,18 +160,7 @@ fn describe(counts: &PrCounts) -> String {
 }
 
 fn render_footer(frame: &mut Frame, area: Rect, state: &AppState) {
-    let text = state.status.clone().map(Line::from).unwrap_or_else(|| {
-        Line::from(vec![
-            Span::styled(format!("{}/{}", glyphs().up, glyphs().down), THEME.text.key),
-            Span::raw(" select  "),
-            Span::styled("enter", THEME.text.key.fg(THEME.colors.success)),
-            Span::raw(" view  "),
-            Span::styled("r", THEME.text.key.fg(THEME.colors.warning)),
-            Span::raw(" refresh  "),
-            Span::styled("q", THEME.text.key.fg(THEME.colors.danger)),
-            Span::raw(" quit"),
-        ])
-    });
+    let text = footer_line(state);
 
     frame.render_widget(
         Paragraph::new(text).style(THEME.text.body).block(
@@ -181,6 +170,41 @@ fn render_footer(frame: &mut Frame, area: Rect, state: &AppState) {
         ),
         area,
     );
+}
+
+fn footer_line(state: &AppState) -> Line<'static> {
+    if let Some(error) = &state.error {
+        Line::from(vec![
+            Span::styled("error: ", THEME.text.key.fg(THEME.colors.danger)),
+            Span::raw(error.clone()),
+            Span::raw("  "),
+            Span::styled("x", THEME.text.key.fg(THEME.colors.warning)),
+            Span::raw(" dismiss"),
+        ])
+    } else if state.refresh_in_flight {
+        Line::from(vec![
+            Span::styled(
+                format!("{} ", spinner_frame(state.refresh_spinner_frame)),
+                THEME.text.key.fg(THEME.colors.secondary),
+            ),
+            Span::raw("Refreshing stacks…  "),
+            Span::styled("r", THEME.text.key.fg(THEME.colors.warning)),
+            Span::raw(" queue refresh"),
+        ])
+    } else {
+        state.status.clone().map(Line::from).unwrap_or_else(|| {
+            Line::from(vec![
+                Span::styled(format!("{}/{}", glyphs().up, glyphs().down), THEME.text.key),
+                Span::raw(" select  "),
+                Span::styled("enter", THEME.text.key.fg(THEME.colors.success)),
+                Span::raw(" view  "),
+                Span::styled("r", THEME.text.key.fg(THEME.colors.warning)),
+                Span::raw(" refresh  "),
+                Span::styled("q", THEME.text.key.fg(THEME.colors.danger)),
+                Span::raw(" quit"),
+            ])
+        })
+    }
 }
 
 fn glyphs() -> &'static GlyphSet {
@@ -272,6 +296,12 @@ mod tests {
             ],
             screen: Screen::List,
             status: None,
+            error: None,
+            refresh_in_flight: false,
+            refresh_spinner_frame: 0,
+            refresh_request_id: 0,
+            refresh_active_request_id: None,
+            last_successful_stacks: Vec::new(),
             layer_details: Default::default(),
             layer_diffs: Default::default(),
             should_quit: false,
@@ -297,5 +327,30 @@ mod tests {
         component.update(&Action::StacksLoaded(None), &mut state);
 
         assert_eq!(component.list_state.selected(), None);
+    }
+
+    #[test]
+    fn footer_shows_loading_indicator_while_refreshing() {
+        let mut state = app_state();
+        state.refresh_in_flight = true;
+        let text = footer_line(&state)
+            .spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect::<String>();
+        assert!(text.contains("Refreshing stacks"));
+    }
+
+    #[test]
+    fn footer_shows_dismissible_error_banner() {
+        let mut state = app_state();
+        state.error = Some("network issue".to_string());
+        let text = footer_line(&state)
+            .spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect::<String>();
+        assert!(text.contains("error:"));
+        assert!(text.contains("dismiss"));
     }
 }

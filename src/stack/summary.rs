@@ -281,4 +281,44 @@ mod tests {
         assert!(!summaries[0].is_current);
         assert_eq!(summaries[0].label, "layer-1");
     }
+
+    #[tokio::test]
+    async fn propagates_timeout_errors_while_hydrating_pull_requests() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        write_local_stacks(
+            temp_dir.path(),
+            r#"{
+                "stacks": [
+                    {
+                        "trunk": { "branch": "main" },
+                        "branches": [ { "branch": "layer-1", "base": "main" } ]
+                    }
+                ]
+            }"#,
+        );
+
+        let shell = MockShell::new()
+            .when("git", &["rev-parse", "--abbrev-ref", "HEAD"], ok("main"))
+            .when(
+                "gh",
+                &[
+                    "pr",
+                    "view",
+                    "layer-1",
+                    "--json",
+                    "number,url,state,title,isDraft,reviewDecision",
+                ],
+                Err(ShellError::Timeout {
+                    program: "gh".to_string(),
+                    timeout: std::time::Duration::from_secs(1),
+                }),
+            );
+
+        let result = list_stacks(&shell, temp_dir.path()).await;
+
+        assert!(matches!(
+            result,
+            Err(StackSummaryError::Shell(ShellError::Timeout { .. }))
+        ));
+    }
 }

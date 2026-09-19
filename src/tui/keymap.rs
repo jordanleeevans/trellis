@@ -13,6 +13,7 @@ pub(crate) enum KeyIntent {
     PageDown,
     PageUp,
     OpenExternal,
+    DismissMessage,
 }
 
 pub(crate) fn key_intent(code: KeyCode) -> Option<KeyIntent> {
@@ -28,6 +29,7 @@ pub(crate) fn key_intent(code: KeyCode) -> Option<KeyIntent> {
         KeyCode::PageDown | KeyCode::Char(' ') => Some(KeyIntent::PageDown),
         KeyCode::PageUp | KeyCode::Backspace => Some(KeyIntent::PageUp),
         KeyCode::Char('O') => Some(KeyIntent::OpenExternal),
+        KeyCode::Char('x') => Some(KeyIntent::DismissMessage),
         _ => None,
     }
 }
@@ -48,5 +50,9 @@ mod tests {
         assert_eq!(key_intent(KeyCode::Esc), Some(KeyIntent::Back));
         assert_eq!(key_intent(KeyCode::Char('q')), Some(KeyIntent::Back));
         assert_eq!(key_intent(KeyCode::Char('?')), Some(KeyIntent::Help));
+        assert_eq!(
+            key_intent(KeyCode::Char('x')),
+            Some(KeyIntent::DismissMessage)
+        );
     }
 }
