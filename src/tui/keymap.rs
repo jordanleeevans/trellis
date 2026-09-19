@@ -9,6 +9,7 @@ pub(crate) enum KeyIntent {
     DrillIn,
     Back,
     Refresh,
+    Checkout,
     Help,
     PageDown,
     PageUp,
@@ -25,6 +26,7 @@ pub(crate) fn key_intent(code: KeyCode) -> Option<KeyIntent> {
         KeyCode::Enter => Some(KeyIntent::DrillIn),
         KeyCode::Esc | KeyCode::Char('q') => Some(KeyIntent::Back),
         KeyCode::Char('r') => Some(KeyIntent::Refresh),
+        KeyCode::Char('c') => Some(KeyIntent::Checkout),
         KeyCode::Char('?') => Some(KeyIntent::Help),
         KeyCode::PageDown | KeyCode::Char(' ') => Some(KeyIntent::PageDown),
         KeyCode::PageUp | KeyCode::Backspace => Some(KeyIntent::PageUp),
@@ -49,6 +51,7 @@ mod tests {
         assert_eq!(key_intent(KeyCode::Enter), Some(KeyIntent::DrillIn));
         assert_eq!(key_intent(KeyCode::Esc), Some(KeyIntent::Back));
         assert_eq!(key_intent(KeyCode::Char('q')), Some(KeyIntent::Back));
+        assert_eq!(key_intent(KeyCode::Char('c')), Some(KeyIntent::Checkout));
         assert_eq!(key_intent(KeyCode::Char('?')), Some(KeyIntent::Help));
         assert_eq!(
             key_intent(KeyCode::Char('x')),

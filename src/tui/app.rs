@@ -41,6 +41,10 @@ pub enum Action {
     ScrollDiffUp,
     ShowLayers(usize),
     ShowList,
+    CheckoutSelected {
+        stack_index: usize,
+        layer_index: Option<usize>,
+    },
     OpenPullRequest {
         stack_index: usize,
         layer_index: usize,
@@ -398,6 +402,50 @@ impl App {
             Action::ShowList => {
                 self.state.screen = Screen::List;
                 Vec::new()
+            }
+            Action::CheckoutSelected {
+                stack_index,
+                layer_index,
+            } => {
+                let Some(stack) = self.state.stacks.get(*stack_index) else {
+                    self.state.status = Some("selected stack is no longer available".to_string());
+                    return Vec::new();
+                };
+
+                let target_branch = match layer_index {
+                    Some(index) => {
+                        let Some(layer) = stack.layers.get(*index) else {
+                            self.state.status =
+                                Some("selected layer is no longer available".to_string());
+                            return Vec::new();
+                        };
+                        layer.branch.clone()
+                    }
+                    None => {
+                        let Some(layer) = stack
+                            .layers
+                            .iter()
+                            .find(|layer| layer.is_current)
+                            .or_else(|| stack.layers.last())
+                        else {
+                            self.state.status = Some("selected stack has no layers".to_string());
+                            return Vec::new();
+                        };
+                        layer.branch.clone()
+                    }
+                };
+
+                if let Err(error) = shell
+                    .run(repo, "gh", &["stack", "checkout", &target_branch])
+                    .await
+                {
+                    return vec![Action::SetError(friendly_shell_error(
+                        "checkout stack",
+                        &error,
+                    ))];
+                }
+
+                vec![Action::RefreshStacks]
             }
             Action::OpenPullRequest {
                 stack_index,
@@ -787,6 +835,126 @@ mod tests {
                 }
             ]
         ));
+    }
+
+    #[tokio::test]
+    async fn checkout_selected_stack_uses_current_layer_when_present() {
+        let repo = std::env::current_dir().unwrap();
+        let shell = MockShell::new().when(
+            "gh",
+            &["stack", "checkout", "stack-a-layer-0"],
+            Ok(crate::shell::ShellOutput {
+                stdout: String::new(),
+                stderr: String::new(),
+                exit_code: 0,
+            }),
+        );
+        let mut app = App::new();
+        app.state.stacks = vec![stack_summary("stack-a", 2)];
+        app.state.stacks[0].layers[0].is_current = true;
+
+        let follow_ups = app
+            .apply_action(
+                &Action::CheckoutSelected {
+                    stack_index: 0,
+                    layer_index: None,
+                },
+                &shell,
+                repo.as_path(),
+            )
+            .await;
+
+        assert!(matches!(follow_ups.as_slice(), [Action::RefreshStacks]));
+    }
+
+    #[tokio::test]
+    async fn checkout_selected_stack_uses_top_layer_when_none_current() {
+        let repo = std::env::current_dir().unwrap();
+        let shell = MockShell::new().when(
+            "gh",
+            &["stack", "checkout", "stack-a-layer-1"],
+            Ok(crate::shell::ShellOutput {
+                stdout: String::new(),
+                stderr: String::new(),
+                exit_code: 0,
+            }),
+        );
+        let mut app = App::new();
+        app.state.stacks = vec![stack_summary("stack-a", 2)];
+
+        let follow_ups = app
+            .apply_action(
+                &Action::CheckoutSelected {
+                    stack_index: 0,
+                    layer_index: None,
+                },
+                &shell,
+                repo.as_path(),
+            )
+            .await;
+
+        assert!(matches!(follow_ups.as_slice(), [Action::RefreshStacks]));
+    }
+
+    #[tokio::test]
+    async fn checkout_selected_layer_uses_selected_layer_branch() {
+        let repo = std::env::current_dir().unwrap();
+        let shell = MockShell::new().when(
+            "gh",
+            &["stack", "checkout", "stack-a-layer-1"],
+            Ok(crate::shell::ShellOutput {
+                stdout: String::new(),
+                stderr: String::new(),
+                exit_code: 0,
+            }),
+        );
+        let mut app = App::new();
+        app.state.stacks = vec![stack_summary("stack-a", 2)];
+
+        let follow_ups = app
+            .apply_action(
+                &Action::CheckoutSelected {
+                    stack_index: 0,
+                    layer_index: Some(1),
+                },
+                &shell,
+                repo.as_path(),
+            )
+            .await;
+
+        assert!(matches!(follow_ups.as_slice(), [Action::RefreshStacks]));
+    }
+
+    #[tokio::test]
+    async fn checkout_selected_returns_set_error_on_checkout_failure() {
+        let repo = std::env::current_dir().unwrap();
+        let shell = MockShell::new().when(
+            "gh",
+            &["stack", "checkout", "stack-a-layer-0"],
+            Err(crate::shell::ShellError::CommandFailed {
+                program: "gh".to_string(),
+                output: crate::shell::ShellOutput {
+                    stdout: String::new(),
+                    stderr: "boom".to_string(),
+                    exit_code: 1,
+                },
+            }),
+        );
+        let mut app = App::new();
+        app.state.stacks = vec![stack_summary("stack-a", 1)];
+
+        let follow_ups = app
+            .apply_action(
+                &Action::CheckoutSelected {
+                    stack_index: 0,
+                    layer_index: None,
+                },
+                &shell,
+                repo.as_path(),
+            )
+            .await;
+
+        assert!(matches!(follow_ups.as_slice(), [Action::SetError(_)]));
     }
 
     #[tokio::test]
