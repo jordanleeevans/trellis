@@ -1,4 +1,5 @@
 use std::path::Path;
+use std::time::Duration;
 
 use std::process::Stdio;
 
@@ -29,6 +30,8 @@ fn binary_exists(program: &str) -> bool {
 #[derive(Debug, Default)]
 pub struct ProcessShell;
 
+const COMMAND_TIMEOUT: Duration = Duration::from_secs(15);
+
 /// An event emitted while a [`RunningCommand`] executes.
 #[derive(Debug, Clone, PartialEq)]
 pub enum ShellEvent {
@@ -55,11 +58,28 @@ impl Shell for ProcessShell {
         program: &str,
         args: &[&str],
     ) -> Result<ShellOutput, ShellError> {
-        let result = Command::new(program)
-            .args(args)
-            .current_dir(cwd)
-            .output()
-            .await;
+        self.run_with_timeout(cwd, program, args, COMMAND_TIMEOUT)
+            .await
+    }
+}
+
+impl ProcessShell {
+    async fn run_with_timeout(
+        &self,
+        cwd: &Path,
+        program: &str,
+        args: &[&str],
+        timeout: Duration,
+    ) -> Result<ShellOutput, ShellError> {
+        let result = Command::new(program).args(args).current_dir(cwd).output();
+
+        let result =
+            tokio::time::timeout(timeout, result)
+                .await
+                .map_err(|_| ShellError::Timeout {
+                    program: program.to_owned(),
+                    timeout,
+                })?;
 
         let output = match result {
             Ok(output) => output,
@@ -90,9 +110,6 @@ impl Shell for ProcessShell {
             })
         }
     }
-}
-
-impl ProcessShell {
     /// Spawns `program` and streams its stdout/stderr lines as they arrive,
     /// rather than waiting for it to finish like [`Shell::run`].
     pub fn stream(
@@ -334,5 +351,22 @@ mod tests {
         assert!(saw_stdout);
         assert!(saw_stderr);
         assert!(saw_finished);
+    }
+
+    #[tokio::test]
+    async fn returns_timeout_when_command_runs_too_long() {
+        let result = ProcessShell
+            .run_with_timeout(
+                env::current_dir().unwrap().as_path(),
+                "sh",
+                &["-c", "sleep 1"],
+                Duration::from_millis(10),
+            )
+            .await;
+
+        assert!(matches!(
+            result,
+            Err(ShellError::Timeout { program, .. }) if program == "sh"
+        ));
     }
 }

@@ -33,4 +33,11 @@ pub enum ShellError {
     /// The process produced output that could not be interpreted as expected.
     #[error("unexpected output: {0}")]
     UnexpectedOutput(String),
+
+    /// The process did not complete before the configured timeout.
+    #[error("command timed out after {timeout:?}: {program}")]
+    Timeout {
+        program: String,
+        timeout: std::time::Duration,
+    },
 }

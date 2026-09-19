@@ -10,7 +10,7 @@ use crate::theme::glyphs::{GlyphSet, NERD_FONT};
 use crate::theme::ui::THEME;
 use crate::tui::app::{
     Action, AppState, Component, Screen, layer_detail_cache_key, layer_diff_cache_key,
-    lower_layer_ref,
+    lower_layer_ref, spinner_frame,
 };
 
 use super::keymap::{KeyIntent, key_intent};
@@ -82,7 +82,7 @@ fn render(
         selected_diff_file,
         diff_scroll,
     );
-    render_footer(frame, footer_area);
+    render_footer(frame, footer_area, state);
 }
 
 fn render_header(frame: &mut Frame, area: Rect, stack: &StackSummary) {
@@ -104,23 +104,45 @@ fn render_header(frame: &mut Frame, area: Rect, stack: &StackSummary) {
     );
 }
 
-fn render_footer(frame: &mut Frame, area: Rect) {
-    let content = Line::from(vec![
-        Span::styled("j/k", THEME.text.key),
-        Span::raw(" navigate  "),
-        Span::styled("O", THEME.text.key),
-        Span::raw(" open PR  "),
-        Span::styled("r", THEME.text.key),
-        Span::raw(" refresh  "),
-        Span::styled("tab/h/l", THEME.text.key),
-        Span::raw(" panels  "),
-        Span::styled("PgUp/PgDn", THEME.text.key),
-        Span::raw(" diff  "),
-        Span::styled("esc/q", THEME.text.key),
-        Span::raw(" back"),
-    ]);
+fn render_footer(frame: &mut Frame, area: Rect, state: &AppState) {
+    let content = footer_line(state);
 
     frame.render_widget(Paragraph::new(content), area);
+}
+
+fn footer_line(state: &AppState) -> Line<'static> {
+    if let Some(error) = &state.error {
+        Line::from(vec![
+            Span::styled("error: ", THEME.text.key.fg(THEME.colors.danger)),
+            Span::raw(error.clone()),
+            Span::raw("  "),
+            Span::styled("x", THEME.text.key.fg(THEME.colors.warning)),
+            Span::raw(" dismiss"),
+        ])
+    } else if state.refresh_in_flight {
+        Line::from(vec![
+            Span::styled(
+                format!("{} ", spinner_frame(state.refresh_spinner_frame)),
+                THEME.text.key.fg(THEME.colors.secondary),
+            ),
+            Span::raw("Refreshing stacks in background"),
+        ])
+    } else {
+        Line::from(vec![
+            Span::styled("j/k", THEME.text.key),
+            Span::raw(" navigate  "),
+            Span::styled("O", THEME.text.key),
+            Span::raw(" open PR  "),
+            Span::styled("r", THEME.text.key),
+            Span::raw(" refresh  "),
+            Span::styled("tab/h/l", THEME.text.key),
+            Span::raw(" panels  "),
+            Span::styled("PgUp/PgDn", THEME.text.key),
+            Span::raw(" diff  "),
+            Span::styled("esc/q", THEME.text.key),
+            Span::raw(" back"),
+        ])
+    }
 }
 
 fn render_stack(
@@ -901,6 +923,12 @@ mod tests {
             stacks,
             screen,
             status: None,
+            error: None,
+            refresh_in_flight: false,
+            refresh_spinner_frame: 0,
+            refresh_request_id: 0,
+            refresh_active_request_id: None,
+            last_successful_stacks: Vec::new(),
             layer_details: LayerResourceCache::default(),
             layer_diffs: LayerResourceCache::default(),
             should_quit: false,
@@ -1150,5 +1178,30 @@ mod tests {
         assert!(text.contains("octocat APPROVED"));
         assert!(text.contains("2 total, 1 pass, 0 fail, 1 pending"));
         assert!(text.contains("abcdef1  feat: render details  john-doe"));
+    }
+
+    #[test]
+    fn footer_shows_refresh_indicator_when_loading() {
+        let mut state = app_state(vec![stack_summary("a", 1)], Screen::Layers(0));
+        state.refresh_in_flight = true;
+        let text = footer_line(&state)
+            .spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect::<String>();
+        assert!(text.contains("Refreshing stacks"));
+    }
+
+    #[test]
+    fn footer_shows_dismissible_error() {
+        let mut state = app_state(vec![stack_summary("a", 1)], Screen::Layers(0));
+        state.error = Some("auth required".to_string());
+        let text = footer_line(&state)
+            .spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect::<String>();
+        assert!(text.contains("error:"));
+        assert!(text.contains("dismiss"));
     }
 }

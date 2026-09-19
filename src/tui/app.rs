@@ -7,9 +7,11 @@ use ratatui::Frame;
 use tokio::sync::mpsc;
 
 use crate::git;
-use crate::shell::{ProcessShell, Shell};
-use crate::stack::{Layer, LayerDetail, StackSummary, hydrate_layer_detail, list_stacks};
+use crate::shell::{ProcessShell, Shell, ShellError};
+use crate::stack::hydrate_layer_detail;
+use crate::stack::{Layer, LayerDetail, StackSummary, list_stacks};
 
+use super::keymap::{KeyIntent, key_intent};
 use super::layer_resource::LayerResourceCache;
 use super::stack_layers;
 use super::stack_list;
@@ -61,7 +63,17 @@ pub enum Action {
         cache_key: String,
         result: Result<String, String>,
     },
+    StackRefreshStarted {
+        request_id: u64,
+    },
+    StackRefreshSucceeded {
+        request_id: u64,
+        result: Result<Vec<StackSummary>, String>,
+    },
+    Tick,
     StacksLoaded(Option<usize>),
+    SetError(String),
+    ClearError,
     SetStatus(String),
     ClearStatus,
 }
@@ -76,6 +88,12 @@ pub struct AppState {
     pub stacks: Vec<StackSummary>,
     pub screen: Screen,
     pub status: Option<String>,
+    pub error: Option<String>,
+    pub refresh_in_flight: bool,
+    pub refresh_spinner_frame: usize,
+    pub refresh_request_id: u64,
+    pub refresh_active_request_id: Option<u64>,
+    pub last_successful_stacks: Vec<StackSummary>,
     pub layer_details: LayerResourceCache<LayerDetail>,
     pub layer_diffs: LayerResourceCache<String>,
     pub(crate) should_quit: bool,
@@ -93,6 +111,12 @@ impl AppState {
             stacks: Vec::new(),
             screen: Screen::List,
             status: None,
+            error: None,
+            refresh_in_flight: false,
+            refresh_spinner_frame: 0,
+            refresh_request_id: 0,
+            refresh_active_request_id: None,
+            last_successful_stacks: Vec::new(),
             layer_details: LayerResourceCache::default(),
             layer_diffs: LayerResourceCache::default(),
             should_quit: false,
@@ -109,10 +133,8 @@ impl App {
         }
     }
 
-    /// Reloads every locally tracked stack, preserving the current
-    /// selection (by stack) where possible.
-    async fn refresh(&mut self, shell: &impl Shell, repo: &Path) -> Vec<Action> {
-        let selected_label = match self.state.screen {
+    fn selected_stack_label(&self) -> Option<String> {
+        match self.state.screen {
             Screen::Layers(index) => self
                 .state
                 .stacks
@@ -123,35 +145,35 @@ impl App {
                 .selected_index()
                 .and_then(|index| self.state.stacks.get(index))
                 .map(|stack| stack.label.clone()),
-        };
-
-        match list_stacks(shell, repo).await {
-            Ok(stacks) => {
-                let selected_index = selected_label
-                    .and_then(|label| stacks.iter().position(|stack| stack.label == label))
-                    .or_else(|| stacks.iter().position(|stack| stack.is_current))
-                    .or(if stacks.is_empty() { None } else { Some(0) });
-
-                self.state.stacks = stacks;
-                let mut actions = vec![Action::StacksLoaded(selected_index)];
-
-                if matches!(self.state.screen, Screen::Layers(_)) {
-                    if let Some(index) = selected_index {
-                        self.state.screen = Screen::Layers(index);
-                        actions.push(Action::ClearStatus);
-                    } else {
-                        self.state.screen = Screen::List;
-                        actions.push(Action::SetStatus(
-                            "selected stack is no longer available".to_string(),
-                        ));
-                    }
-                } else {
-                    actions.push(Action::ClearStatus);
-                }
-                actions
-            }
-            Err(error) => vec![Action::SetStatus(format!("failed to load stacks: {error}"))],
         }
+    }
+
+    fn apply_stacks_loaded(&mut self, stacks: Vec<StackSummary>) -> Vec<Action> {
+        let selected_label = self.selected_stack_label();
+        let selected_index = selected_label
+            .and_then(|label| stacks.iter().position(|stack| stack.label == label))
+            .or_else(|| stacks.iter().position(|stack| stack.is_current))
+            .or(if stacks.is_empty() { None } else { Some(0) });
+
+        self.state.stacks = stacks;
+        self.state.last_successful_stacks = self.state.stacks.clone();
+        let mut actions = vec![Action::StacksLoaded(selected_index)];
+
+        if matches!(self.state.screen, Screen::Layers(_)) {
+            if let Some(index) = selected_index {
+                self.state.screen = Screen::Layers(index);
+                actions.push(Action::ClearStatus);
+            } else {
+                self.state.screen = Screen::List;
+                actions.push(Action::SetStatus(
+                    "selected stack is no longer available".to_string(),
+                ));
+            }
+        } else {
+            actions.push(Action::ClearStatus);
+        }
+
+        actions
     }
 
     fn draw(&mut self, frame: &mut Frame) {
@@ -162,10 +184,16 @@ impl App {
     }
 
     fn handle_key(&mut self, code: KeyCode) -> Vec<Action> {
-        match self.state.screen {
+        let mut actions = match self.state.screen {
             Screen::List => self.stack_list.handle_key(code, &self.state),
             Screen::Layers(_) => self.stack_layers.handle_key(code, &self.state),
+        };
+
+        if self.state.error.is_some() && key_intent(code) == Some(KeyIntent::DismissMessage) {
+            actions.push(Action::ClearError);
         }
+
+        actions
     }
 
     async fn dispatch_actions_with_loader(
@@ -173,13 +201,13 @@ impl App {
         actions: Vec<Action>,
         shell: &impl Shell,
         repo: &Path,
-        loader: Option<&LayerLoadScheduler>,
+        loader: Option<&ActionScheduler>,
     ) {
         let mut pending = std::collections::VecDeque::from(actions);
 
         while let Some(action) = pending.pop_front() {
             let follow_ups = if let Some(loader) = loader {
-                if self.schedule_layer_load(&action, loader) {
+                if self.schedule_async_action(&action, loader) {
                     Vec::new()
                 } else {
                     self.apply_action(&action, shell, repo).await
@@ -209,8 +237,18 @@ impl App {
         }
     }
 
-    fn schedule_layer_load(&mut self, action: &Action, loader: &LayerLoadScheduler) -> bool {
+    fn schedule_async_action(&mut self, action: &Action, loader: &ActionScheduler) -> bool {
         match action {
+            Action::StackRefreshStarted { request_id } => {
+                self.state.refresh_in_flight = true;
+                self.state.refresh_spinner_frame = 0;
+                self.state.refresh_active_request_id = Some(*request_id);
+                if !self.state.stacks.is_empty() {
+                    self.state.last_successful_stacks = self.state.stacks.clone();
+                }
+                loader.load_stacks(*request_id);
+                true
+            }
             Action::LoadLayerDetail {
                 stack_index,
                 layer_index,
@@ -298,19 +336,47 @@ impl App {
                 self.state.should_quit = true;
                 Vec::new()
             }
-            Action::RefreshStacks => self.refresh(shell, repo).await,
+            Action::RefreshStacks => {
+                self.state.refresh_request_id += 1;
+                vec![Action::StackRefreshStarted {
+                    request_id: self.state.refresh_request_id,
+                }]
+            }
+            Action::StackRefreshStarted { request_id } => {
+                self.state.refresh_in_flight = true;
+                self.state.refresh_spinner_frame = 0;
+                self.state.refresh_active_request_id = Some(*request_id);
+                if !self.state.stacks.is_empty() {
+                    self.state.last_successful_stacks = self.state.stacks.clone();
+                }
+                Vec::new()
+            }
+            Action::StackRefreshSucceeded { request_id, result } => {
+                if Some(*request_id) != self.state.refresh_active_request_id {
+                    return Vec::new();
+                }
+
+                self.state.refresh_in_flight = false;
+                self.state.refresh_active_request_id = None;
+
+                match result {
+                    Ok(stacks) => self.apply_stacks_loaded(stacks.clone()),
+                    Err(error) => vec![Action::SetError(format!(
+                        "failed to refresh stacks: {}",
+                        friendly_stack_refresh_error(error)
+                    ))],
+                }
+            }
+            Action::Tick => {
+                if self.state.refresh_in_flight {
+                    self.state.refresh_spinner_frame =
+                        self.state.refresh_spinner_frame.wrapping_add(1);
+                }
+                Vec::new()
+            }
             Action::ShowLayers(index) => {
                 if *index < self.state.stacks.len() {
                     self.state.screen = Screen::Layers(*index);
-                    if self
-                        .state
-                        .status
-                        .as_deref()
-                        .is_some_and(|status| status.starts_with("failed to load stacks:"))
-                    {
-                        self.state.status = None;
-                    }
-
                     vec![
                         Action::LoadLayerDetail {
                             stack_index: *index,
@@ -349,7 +415,10 @@ impl App {
                         .run(repo, "gh", &["pr", "view", &pr_number, "--web"])
                         .await
                     {
-                        self.state.status = Some(format!("failed to open PR: {error}"));
+                        return vec![Action::SetError(friendly_shell_error(
+                            "open pull request",
+                            &error,
+                        ))];
                     }
                 } else {
                     self.state.status = Some("selected layer has no pull request".to_string());
@@ -385,11 +454,11 @@ impl App {
                         self.state.layer_details.store_result(cache_key, Ok(detail));
                     }
                     Err(error) => {
-                        let message = error.to_string();
+                        let message = friendly_shell_error("load layer detail", &error);
                         self.state
                             .layer_details
                             .store_result(cache_key, Err(message.clone()));
-                        self.state.status = Some(format!("failed to load layer detail: {message}"));
+                        return vec![Action::SetError(message)];
                     }
                 }
 
@@ -397,7 +466,7 @@ impl App {
             }
             Action::LayerDetailLoaded { cache_key, result } => {
                 if let Err(error) = result {
-                    self.state.status = Some(format!("failed to load layer detail: {error}"));
+                    return vec![Action::SetError(error.clone())];
                 }
                 self.state
                     .layer_details
@@ -430,11 +499,11 @@ impl App {
                         self.state.layer_diffs.store_result(cache_key, Ok(diff));
                     }
                     Err(error) => {
-                        let message = error.to_string();
+                        let message = friendly_shell_error("load layer diff", &error);
                         self.state
                             .layer_diffs
                             .store_result(cache_key, Err(message.clone()));
-                        self.state.status = Some(format!("failed to load layer diff: {message}"));
+                        return vec![Action::SetError(message)];
                     }
                 }
 
@@ -442,7 +511,7 @@ impl App {
             }
             Action::LayerDiffLoaded { cache_key, result } => {
                 if let Err(error) = result {
-                    self.state.status = Some(format!("failed to load layer diff: {error}"));
+                    return vec![Action::SetError(error.clone())];
                 }
                 self.state
                     .layer_diffs
@@ -466,6 +535,14 @@ impl App {
                 }
                 Vec::new()
             }
+            Action::SetError(message) => {
+                self.state.error = Some(message.clone());
+                Vec::new()
+            }
+            Action::ClearError => {
+                self.state.error = None;
+                Vec::new()
+            }
             Action::SelectNext
             | Action::SelectPrevious
             | Action::FocusNextPanel
@@ -480,14 +557,25 @@ impl App {
     }
 }
 
-struct LayerLoadScheduler {
+struct ActionScheduler {
     repo: PathBuf,
     tx: mpsc::UnboundedSender<Action>,
 }
 
-impl LayerLoadScheduler {
+impl ActionScheduler {
     fn new(repo: PathBuf, tx: mpsc::UnboundedSender<Action>) -> Self {
         Self { repo, tx }
+    }
+
+    fn load_stacks(&self, request_id: u64) {
+        let repo = self.repo.clone();
+        let tx = self.tx.clone();
+        tokio::spawn(async move {
+            let result = list_stacks(&ProcessShell, repo.as_path())
+                .await
+                .map_err(|error| error.to_string());
+            let _ = tx.send(Action::StackRefreshSucceeded { request_id, result });
+        });
     }
 
     fn load_detail(&self, cache_key: String, branch: String) {
@@ -496,7 +584,7 @@ impl LayerLoadScheduler {
         tokio::spawn(async move {
             let result = hydrate_layer_detail(&ProcessShell, repo.as_path(), &branch)
                 .await
-                .map_err(|error| error.to_string());
+                .map_err(|error| friendly_shell_error("load layer detail", &error));
             let _ = tx.send(Action::LayerDetailLoaded { cache_key, result });
         });
     }
@@ -507,9 +595,65 @@ impl LayerLoadScheduler {
         tokio::spawn(async move {
             let result = git::diff(&ProcessShell, repo.as_path(), &lower, &branch)
                 .await
-                .map_err(|error| error.to_string());
+                .map_err(|error| friendly_shell_error("load layer diff", &error));
             let _ = tx.send(Action::LayerDiffLoaded { cache_key, result });
         });
+    }
+}
+
+pub fn spinner_frame(index: usize) -> &'static str {
+    const FRAMES: [&str; 4] = ["|", "/", "-", "\\"];
+    FRAMES[index % FRAMES.len()]
+}
+
+fn friendly_stack_refresh_error(error: &str) -> String {
+    let normalized = error.to_lowercase();
+
+    if normalized.contains("timed out") {
+        return "request timed out while refreshing stacks; check network/auth and retry"
+            .to_string();
+    }
+    if normalized.contains("rate limit") {
+        return "GitHub API rate limit reached; retry later".to_string();
+    }
+    if normalized.contains("not logged in") || normalized.contains("authentication") {
+        return "GitHub authentication required; run `gh auth login`".to_string();
+    }
+    if normalized.contains("network") || normalized.contains("could not resolve host") {
+        return "network failure while refreshing stacks".to_string();
+    }
+
+    error.to_string()
+}
+
+fn friendly_shell_error(context: &str, error: &ShellError) -> String {
+    match error {
+        ShellError::Timeout { .. } => {
+            format!("{context}: request timed out; check network/auth and retry")
+        }
+        ShellError::BinaryNotFound(program) => {
+            format!("{context}: required binary `{program}` not found")
+        }
+        ShellError::CommandFailed { program, output } if program == "gh" => {
+            let stderr = output.stderr.to_lowercase();
+            if stderr.contains("rate limit") {
+                format!("{context}: GitHub API rate limit reached; retry later")
+            } else if stderr.contains("not logged in")
+                || stderr.contains("authentication")
+                || stderr.contains("401")
+            {
+                format!("{context}: GitHub authentication required; run `gh auth login`")
+            } else if stderr.contains("network")
+                || stderr.contains("timed out")
+                || stderr.contains("could not resolve host")
+            {
+                format!("{context}: network failure while calling gh")
+            } else {
+                format!("{context}: {}", output.stderr.trim())
+            }
+        }
+        ShellError::CommandFailed { output, .. } => format!("{context}: {}", output.stderr.trim()),
+        _ => format!("{context}: {error}"),
     }
 }
 
@@ -529,9 +673,8 @@ async fn run_app(
 ) -> anyhow::Result<()> {
     let mut app = App::new();
     let (tx, mut rx) = mpsc::unbounded_channel();
-    let loader = LayerLoadScheduler::new(repo.to_path_buf(), tx);
-    let initial_actions = app.refresh(shell, repo).await;
-    app.dispatch_actions_with_loader(initial_actions, shell, repo, Some(&loader))
+    let loader = ActionScheduler::new(repo.to_path_buf(), tx);
+    app.dispatch_actions_with_loader(vec![Action::RefreshStacks], shell, repo, Some(&loader))
         .await;
 
     while !app.state.should_quit {
@@ -539,6 +682,9 @@ async fn run_app(
             app.dispatch_actions_with_loader(vec![action], shell, repo, Some(&loader))
                 .await;
         }
+
+        app.dispatch_actions_with_loader(vec![Action::Tick], shell, repo, Some(&loader))
+            .await;
 
         terminal.draw(|frame| app.draw(frame))?;
 
@@ -676,5 +822,98 @@ mod tests {
 
         let key = layer_diff_cache_key(&app.state.stacks[0], &app.state.stacks[0].layers[0]);
         assert_eq!(app.state.layer_diffs.get(&key).unwrap(), "+bottom");
+    }
+
+    #[tokio::test]
+    async fn refresh_stacks_creates_started_action_without_blocking() {
+        let repo = std::env::current_dir().unwrap();
+        let shell = MockShell::new();
+        let mut app = App::new();
+
+        let follow_ups = app
+            .apply_action(&Action::RefreshStacks, &shell, repo.as_path())
+            .await;
+
+        assert!(matches!(
+            follow_ups.as_slice(),
+            [Action::StackRefreshStarted { request_id: 1 }]
+        ));
+        assert!(!app.state.refresh_in_flight);
+    }
+
+    #[tokio::test]
+    async fn refresh_started_sets_loading_and_keeps_existing_stacks() {
+        let repo = std::env::current_dir().unwrap();
+        let shell = MockShell::new();
+        let mut app = App::new();
+        app.state.stacks = vec![stack_summary("stack-a", 2)];
+
+        app.apply_action(
+            &Action::StackRefreshStarted { request_id: 9 },
+            &shell,
+            repo.as_path(),
+        )
+        .await;
+
+        assert!(app.state.refresh_in_flight);
+        assert_eq!(app.state.refresh_active_request_id, Some(9));
+        assert_eq!(app.state.stacks.len(), 1);
+        assert_eq!(app.state.last_successful_stacks.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn refresh_success_ignores_outdated_request_ids() {
+        let repo = std::env::current_dir().unwrap();
+        let shell = MockShell::new();
+        let mut app = App::new();
+        app.state.stacks = vec![stack_summary("stack-a", 1)];
+        app.state.refresh_active_request_id = Some(2);
+
+        app.apply_action(
+            &Action::StackRefreshSucceeded {
+                request_id: 1,
+                result: Ok(vec![stack_summary("stack-b", 1)]),
+            },
+            &shell,
+            repo.as_path(),
+        )
+        .await;
+
+        assert_eq!(app.state.stacks[0].label, "stack-a");
+    }
+
+    #[tokio::test]
+    async fn refresh_failure_sets_dismissible_error() {
+        let repo = std::env::current_dir().unwrap();
+        let shell = MockShell::new();
+        let mut app = App::new();
+        app.state.refresh_active_request_id = Some(4);
+        app.state.refresh_in_flight = true;
+
+        app.dispatch_actions_with_loader(
+            vec![Action::StackRefreshSucceeded {
+                request_id: 4,
+                result: Err("network timeout".to_string()),
+            }],
+            &shell,
+            repo.as_path(),
+            None,
+        )
+        .await;
+
+        assert!(!app.state.refresh_in_flight);
+        assert!(app.state.error.is_some());
+    }
+
+    #[tokio::test]
+    async fn tick_advances_spinner_while_refreshing() {
+        let repo = std::env::current_dir().unwrap();
+        let shell = MockShell::new();
+        let mut app = App::new();
+        app.state.refresh_in_flight = true;
+
+        app.apply_action(&Action::Tick, &shell, repo.as_path())
+            .await;
+        assert_eq!(app.state.refresh_spinner_frame, 1);
     }
 }
