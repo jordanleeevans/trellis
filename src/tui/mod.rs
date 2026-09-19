@@ -6,6 +6,5 @@ mod keymap;
 mod layer_resource;
 mod panel;
 mod stack_layers;
-mod stack_list;
 
 pub use app::run;
