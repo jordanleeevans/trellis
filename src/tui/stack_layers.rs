@@ -85,12 +85,7 @@ fn render(
     render_footer(frame, footer_area, state);
 }
 
-fn render_header(
-    frame: &mut Frame,
-    area: Rect,
-    state: &AppState,
-    selected_stack: Option<usize>,
-) {
+fn render_header(frame: &mut Frame, area: Rect, state: &AppState, selected_stack: Option<usize>) {
     let header = Block::default()
         .title(Line::from(vec![
             Span::styled(
@@ -827,7 +822,8 @@ impl Component for StackLayers {
             Action::StacksLoaded(_) => {
                 let selected_stack = selected_stack_index(state, self.stack_list_state.selected());
                 self.stack_list_state.select(selected_stack);
-                let active_stack = selected_stack.and_then(|stack_index| state.stacks.get(stack_index));
+                let active_stack =
+                    selected_stack.and_then(|stack_index| state.stacks.get(stack_index));
                 let layer_count = active_stack.map(|stack| stack.layers.len()).unwrap_or(0);
                 let active_label = active_stack.map(|stack| stack.label.clone());
                 let preserve_selection =
@@ -968,7 +964,11 @@ fn selected_stack_index(state: &AppState, fallback: Option<usize>) -> Option<usi
         _ => fallback
             .filter(|index| *index < state.stacks.len())
             .or_else(|| state.stacks.iter().position(|stack| stack.is_current))
-            .or(if state.stacks.is_empty() { None } else { Some(0) }),
+            .or(if state.stacks.is_empty() {
+                None
+            } else {
+                Some(0)
+            }),
     }
 }
 
@@ -1050,8 +1050,6 @@ fn select_previous(state: &mut ListState, count: usize) {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashMap;
-
     use super::*;
     use crate::stack::{
         CheckSummary, LayerCommit, LayerDetail, PullRequestDetail, PullRequestRef, ReviewerState,

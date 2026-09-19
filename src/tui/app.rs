@@ -39,7 +39,6 @@ pub enum Action {
     ScrollDiffDown,
     ScrollDiffUp,
     ShowLayers(usize),
-    ShowList,
     OpenPullRequest {
         stack_index: usize,
         layer_index: usize,
@@ -73,7 +72,6 @@ pub enum Action {
     StacksLoaded(Option<usize>),
     SetError(String),
     ClearError,
-    SetStatus(String),
     ClearStatus,
 }
 
@@ -375,7 +373,6 @@ impl App {
                     Vec::new()
                 }
             }
-            Action::ShowList => Vec::new(),
             Action::OpenPullRequest {
                 stack_index,
                 layer_index,
@@ -493,10 +490,6 @@ impl App {
                 self.state
                     .layer_diffs
                     .store_result(cache_key.clone(), result.clone());
-                Vec::new()
-            }
-            Action::SetStatus(message) => {
-                self.state.status = Some(message.clone());
                 Vec::new()
             }
             Action::ClearStatus => {
