@@ -1,4 +1,4 @@
-use crossterm::event::KeyCode;
+use crossterm::event::KeyEvent;
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Modifier, Style};
@@ -218,8 +218,8 @@ impl Component for StackList {
         render(frame, state, &mut self.list_state);
     }
 
-    fn handle_key(&mut self, code: KeyCode, _state: &AppState) -> Vec<Action> {
-        match key_intent(code) {
+    fn handle_key(&mut self, key: KeyEvent, _state: &AppState) -> Vec<Action> {
+        match key_intent(key) {
             Some(KeyIntent::Back) => vec![Action::Quit],
             Some(KeyIntent::Refresh) => vec![Action::RefreshStacks],
             Some(KeyIntent::MoveDown) => vec![Action::SelectNext],
@@ -288,6 +288,7 @@ fn select_previous(state: &mut ListState, count: usize) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
     use crate::tui::app::Screen;
 
     fn app_state() -> AppState {
@@ -318,6 +319,10 @@ mod tests {
             layer_diffs: Default::default(),
             should_quit: false,
         }
+    }
+
+    fn key(code: KeyCode) -> KeyEvent {
+        KeyEvent::new(code, KeyModifiers::NONE)
     }
 
     #[test]
@@ -372,7 +377,7 @@ mod tests {
         let mut state = app_state();
         component.update(&Action::StacksLoaded(Some(1)), &mut state);
 
-        let actions = component.handle_key(KeyCode::Char('c'), &state);
+        let actions = component.handle_key(key(KeyCode::Char('c')), &state);
 
         assert!(matches!(
             actions.as_slice(),

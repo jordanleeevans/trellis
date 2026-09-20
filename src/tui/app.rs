@@ -1,7 +1,7 @@
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use crossterm::event::{self, Event, KeyCode, KeyEventKind};
+use crossterm::event::{self, Event, KeyEvent, KeyEventKind};
 use ratatui::DefaultTerminal;
 use ratatui::Frame;
 use tokio::sync::mpsc;
@@ -14,14 +14,13 @@ use crate::stack::{Layer, LayerDetail, StackSummary, list_stacks};
 use super::keymap::{KeyIntent, key_intent};
 use super::layer_resource::LayerResourceCache;
 use super::stack_layers;
-use super::stack_list;
 
-/// Which screen is currently shown.
+/// Which stack is currently selected in the unified browser.
 #[derive(Debug, Clone, Copy)]
 pub enum Screen {
-    /// The entry-point panel: every locally tracked stack.
+    /// No stack is currently selected.
     List,
-    /// The layer view for the stack at this index into [`AppState::stacks`].
+    /// The unified browser focused on the stack at this index into [`AppState::stacks`].
     Layers(usize),
 }
 
@@ -39,8 +38,12 @@ pub enum Action {
     ScrollDiffLineUp,
     ScrollDiffDown,
     ScrollDiffUp,
+    ScrollDiffHalfPageDown,
+    ScrollDiffHalfPageUp,
+    ScrollDiffTop,
+    ScrollDiffBottom,
+    ToggleDiffView,
     ShowLayers(usize),
-    ShowList,
     CheckoutSelected {
         stack_index: usize,
         layer_index: Option<usize>,
@@ -78,13 +81,12 @@ pub enum Action {
     StacksLoaded(Option<usize>),
     SetError(String),
     ClearError,
-    SetStatus(String),
     ClearStatus,
 }
 
 pub trait Component {
     fn draw(&mut self, frame: &mut Frame, state: &AppState);
-    fn handle_key(&mut self, code: KeyCode, state: &AppState) -> Vec<Action>;
+    fn handle_key(&mut self, key: KeyEvent, state: &AppState) -> Vec<Action>;
     fn update(&mut self, action: &Action, state: &mut AppState);
 }
 
@@ -105,7 +107,6 @@ pub struct AppState {
 
 struct App {
     state: AppState,
-    stack_list: stack_list::StackList,
     stack_layers: stack_layers::StackLayers,
 }
 
@@ -132,7 +133,6 @@ impl App {
     fn new() -> Self {
         Self {
             state: AppState::new(),
-            stack_list: stack_list::StackList::new(),
             stack_layers: stack_layers::StackLayers::new(),
         }
     }
@@ -144,11 +144,7 @@ impl App {
                 .stacks
                 .get(index)
                 .map(|stack| stack.label.clone()),
-            Screen::List => self
-                .stack_list
-                .selected_index()
-                .and_then(|index| self.state.stacks.get(index))
-                .map(|stack| stack.label.clone()),
+            Screen::List => None,
         }
     }
 
@@ -163,17 +159,11 @@ impl App {
         self.state.last_successful_stacks = self.state.stacks.clone();
         let mut actions = vec![Action::StacksLoaded(selected_index)];
 
-        if matches!(self.state.screen, Screen::Layers(_)) {
-            if let Some(index) = selected_index {
-                self.state.screen = Screen::Layers(index);
-                actions.push(Action::ClearStatus);
-            } else {
-                self.state.screen = Screen::List;
-                actions.push(Action::SetStatus(
-                    "selected stack is no longer available".to_string(),
-                ));
-            }
+        if let Some(index) = selected_index {
+            self.state.screen = Screen::Layers(index);
+            actions.push(Action::ClearStatus);
         } else {
+            self.state.screen = Screen::List;
             actions.push(Action::ClearStatus);
         }
 
@@ -181,19 +171,13 @@ impl App {
     }
 
     fn draw(&mut self, frame: &mut Frame) {
-        match self.state.screen {
-            Screen::List => self.stack_list.draw(frame, &self.state),
-            Screen::Layers(_) => self.stack_layers.draw(frame, &self.state),
-        }
+        self.stack_layers.draw(frame, &self.state);
     }
 
-    fn handle_key(&mut self, code: KeyCode) -> Vec<Action> {
-        let mut actions = match self.state.screen {
-            Screen::List => self.stack_list.handle_key(code, &self.state),
-            Screen::Layers(_) => self.stack_layers.handle_key(code, &self.state),
-        };
+    fn handle_key(&mut self, key: KeyEvent) -> Vec<Action> {
+        let mut actions = self.stack_layers.handle_key(key, &self.state);
 
-        if self.state.error.is_some() && key_intent(code) == Some(KeyIntent::DismissMessage) {
+        if self.state.error.is_some() && key_intent(key) == Some(KeyIntent::DismissMessage) {
             actions.push(Action::ClearError);
         }
 
@@ -219,7 +203,6 @@ impl App {
             } else {
                 self.apply_action(&action, shell, repo).await
             };
-            self.stack_list.update(&action, &mut self.state);
             self.stack_layers.update(&action, &mut self.state);
             pending.extend(follow_ups);
 
@@ -399,10 +382,6 @@ impl App {
                     Vec::new()
                 }
             }
-            Action::ShowList => {
-                self.state.screen = Screen::List;
-                Vec::new()
-            }
             Action::CheckoutSelected {
                 stack_index,
                 layer_index,
@@ -444,7 +423,6 @@ impl App {
                         &error,
                     ))];
                 }
-
                 vec![Action::RefreshStacks]
             }
             Action::OpenPullRequest {
@@ -566,10 +544,6 @@ impl App {
                     .store_result(cache_key.clone(), result.clone());
                 Vec::new()
             }
-            Action::SetStatus(message) => {
-                self.state.status = Some(message.clone());
-                Vec::new()
-            }
             Action::ClearStatus => {
                 self.state.status = None;
                 Vec::new()
@@ -600,7 +574,12 @@ impl App {
             | Action::ScrollDiffLineDown
             | Action::ScrollDiffLineUp
             | Action::ScrollDiffDown
-            | Action::ScrollDiffUp => Vec::new(),
+            | Action::ScrollDiffUp
+            | Action::ScrollDiffHalfPageDown
+            | Action::ScrollDiffHalfPageUp
+            | Action::ScrollDiffTop
+            | Action::ScrollDiffBottom
+            | Action::ToggleDiffView => Vec::new(),
         }
     }
 }
@@ -740,7 +719,7 @@ async fn run_app(
             && let Event::Key(key) = event::read()?
             && key.kind == KeyEventKind::Press
         {
-            let actions = app.handle_key(key.code);
+            let actions = app.handle_key(key);
             app.dispatch_actions_with_loader(actions, shell, repo, Some(&loader))
                 .await;
         }
